@@ -74,7 +74,16 @@ class LinguisticAnalyzer:
         )
 
         filler_rate = self._filler_rate_per_30s(transcript, duration)
-        filler_score = self._filler_score(filler_rate, duration)
+        text = str(transcript.get("transcript", "")).lower()
+        has_repair = bool(
+            re.search(
+                r"\b(what i mean|i mean|sorry|wait|actually|let me rephrase|in other words)\b",
+                text,
+            )
+        )
+        filler_score = self._filler_score(
+            filler_rate, duration, has_semantic_repair=has_repair
+        )
 
         wps_cv = self._wps_cv(transcript)
         wps_cv_score = self._wps_cv_score(wps_cv, calibration)
@@ -106,8 +115,15 @@ class LinguisticAnalyzer:
         return count / (duration_sec / 30.0)
 
     @staticmethod
-    def _filler_score(filler_rate: float, duration_sec: float) -> float:
+    def _filler_score(
+        filler_rate: float,
+        duration_sec: float,
+        *,
+        has_semantic_repair: bool = False,
+    ) -> float:
         if duration_sec > LONG_ANSWER_SEC and filler_rate == 0.0:
+            if has_semantic_repair:
+                return 0.35
             return 1.0
         return float(np.exp(-filler_rate / 3.0))
 

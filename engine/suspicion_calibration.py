@@ -31,6 +31,7 @@ def classify_suspicion_level(
     script_similarity: float,
     naturality_score: float = 0.0,
     natural_similarity: float = 0.0,
+    cognitive_spontaneity: float = 0.0,
 ) -> SuspicionLevel:
     """
     Calibrated tiers — weak scores (0.17–0.23) must not equal strong (0.38+).
@@ -56,9 +57,13 @@ def classify_suspicion_level(
         base = order[max(order.index(base), order.index(bump))]
 
     # Weak suspicion suppression: high spontaneity caps tier
+    spont_cap = (
+        naturality_score >= config.WEAK_SUSPICION_NATURALITY_CAP
+        or cognitive_spontaneity >= config.WEAK_SUSPICION_COGNITIVE_SPONTANEITY_CAP
+    )
     if (
         base in (SuspicionLevel.WEAK, SuspicionLevel.MODERATE)
-        and naturality_score >= config.WEAK_SUSPICION_NATURALITY_CAP
+        and spont_cap
         and natural_similarity >= config.WEAK_SUSPICION_NATURAL_SIM_CAP
         and script < config.STRONG_SCRIPT_THRESHOLD
     ):
@@ -111,12 +116,17 @@ def aggregate_answer_evidence(
             "weak_count": 0.0,
             "strong_ratio": 0.0,
             "moderate_plus_ratio": 0.0,
+            "weak_ratio": 0.0,
+            "longest_weak_streak": 0.0,
+            "weak_density": 0.0,
             "max_level_rank": 0.0,
         }
 
     total_w = 0.0
     strong = moderate = weak = 0
     max_rank = 0
+    longest_weak = 0
+    current_weak = 0
     rank = {
         SuspicionLevel.NONE.value: 0,
         SuspicionLevel.WEAK.value: 1,
@@ -133,12 +143,21 @@ def aggregate_answer_evidence(
         max_rank = max(max_rank, rank.get(level.value, 0))
         if level == SuspicionLevel.STRONG:
             strong += 1
+            current_weak = 0
         elif level == SuspicionLevel.MODERATE:
             moderate += 1
+            current_weak = 0
         elif level == SuspicionLevel.WEAK:
             weak += 1
+            current_weak += 1
+            longest_weak = max(longest_weak, current_weak)
+        else:
+            current_weak = 0
 
     n = len(windows)
+    weak_ratio = weak / n
+    # weak density: sustained weak matters more than sparse weak spikes
+    weak_density = (weak_ratio * min(1.0, longest_weak / max(3, n // 3))) if weak else 0.0
     return {
         "weighted_evidence": round(total_w, 4),
         "strong_count": float(strong),
@@ -146,6 +165,9 @@ def aggregate_answer_evidence(
         "weak_count": float(weak),
         "strong_ratio": round(strong / n, 4),
         "moderate_plus_ratio": round((strong + moderate) / n, 4),
+        "weak_ratio": round(weak_ratio, 4),
+        "longest_weak_streak": float(longest_weak),
+        "weak_density": round(float(weak_density), 4),
         "weak_only_ratio": round(weak / n, 4) if weak and not strong and not moderate else 0.0,
         "max_level_rank": float(max_rank),
     }
@@ -204,6 +226,9 @@ def resolve_answer_status(
     peak_ewma: float = 0.0,
     strong_window_count: int = 0,
     suspicion_momentum: float = 0.0,
+    weak_ratio: float = 0.0,
+    longest_weak_streak: int = 0,
+    avg_script_similarity: float = 0.0,
 ) -> tuple[str, str]:
     """
     Returns (status, confidence).
@@ -264,6 +289,23 @@ def resolve_answer_status(
         ) else "MEDIUM"
         return "PROBABLE_SCRIPT_READING", conf
 
+    # Sustained-weak path: clever scripted reading that never spikes to STRONG/MODERATE.
+    # Must be persistent (ratio + streak) and have elevated script similarity.
+    sustained_weak = (
+        weak_ratio >= config.WEAK_CLUSTER_MIN_RATIO
+        and longest_weak_streak >= config.WEAK_CLUSTER_MIN_STREAK
+        and avg_script_similarity >= config.WEAK_CLUSTER_MIN_AVG_SCRIPT_SIM
+        and not weak_only_dominant
+    )
+    if sustained_weak:
+        if (
+            composite >= margin * config.WEAK_CLUSTER_PROBABLE_COMPOSITE_RATIO
+            and suspicion_momentum >= config.WEAK_CLUSTER_PROBABLE_MIN_MOMENTUM
+        ):
+            return "PROBABLE_SCRIPT_READING", "MEDIUM"
+        if composite >= margin * config.WEAK_CLUSTER_AMBIGUOUS_COMPOSITE_RATIO:
+            return "AMBIGUOUS", "MEDIUM"
+
     ambiguous = (
         composite >= margin * config.AMBIGUOUS_EWMA_RATIO
         or weighted_evidence >= config.AMBIGUOUS_MIN_WEIGHTED_EVIDENCE
@@ -311,6 +353,13 @@ def build_calibration_explanation(
                 f"weighted evidence {evidence.get('weighted_evidence', 0):.2f}"
             )
         else:
+            if (
+                evidence.get("weak_ratio", 0) >= config.WEAK_CLUSTER_MIN_RATIO
+                and evidence.get("longest_weak_streak", 0) >= config.WEAK_CLUSTER_MIN_STREAK
+            ):
+                reasons.append(
+                    "sustained weak suspicious density (clever script-reading pattern)"
+                )
             reasons.append(
                 f"borderline weighted evidence ({evidence.get('weighted_evidence', 0):.2f}) — "
                 "mostly weak/moderate tiers"

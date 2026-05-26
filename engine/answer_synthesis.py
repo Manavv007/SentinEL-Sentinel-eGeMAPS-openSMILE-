@@ -26,6 +26,8 @@ def compute_answer_behavioral_metrics(
     scripts = [float(w.get("script_similarity", 0)) for w in windows]
     naturals = [float(w.get("natural_similarity", 0)) for w in windows]
     nats = [float(w.get("naturality_score", 0)) for w in windows]
+    cog_spont = [float(w.get("cognitive_spontaneity", 0)) for w in windows]
+    cog_guided = [float(w.get("guided_explanation_index", 0)) for w in windows]
 
     n = len(windows)
     strong = sum(1 for lv in levels if lv == SuspicionLevel.STRONG.value)
@@ -82,6 +84,9 @@ def compute_answer_behavioral_metrics(
         "suspicion_momentum": round(
             float(momentum_summary.get("suspicion_momentum", 0)), 4
         ),
+        "cognitive_spontaneity": round(float(np.mean(cog_spont)), 4) if cog_spont else 0.0,
+        "guided_explanation_index": round(float(np.mean(cog_guided)), 4) if cog_guided else 0.0,
+        "peak_cognitive_spontaneity": round(float(max(cog_spont)), 4) if cog_spont else 0.0,
     }
 
 
@@ -108,6 +113,8 @@ def synthesize_final_decision(
     drift = float(behavioral.get("behavioral_drift", 0))
     streak = int(behavioral.get("longest_strong_streak", 0))
     weighted = float(temporal_summary.get("weighted_evidence", 0))
+    cog_spont = float(behavioral.get("cognitive_spontaneity", 0))
+    cog_guided = float(behavioral.get("guided_explanation_index", 0))
 
     reasons: list[str] = []
 
@@ -151,6 +158,21 @@ def synthesize_final_decision(
         and promotion_gate
     )
 
+  # Guided preconstructed flow (scripted answers 2,4,6,7 target)
+    guided_scripted = (
+        cog_guided >= config.COGNITIVE_GUIDED_HIGH_THRESHOLD
+        and cog_spont < config.COGNITIVE_CLEAR_GUIDED_MAX
+        and density >= config.DOMINANT_MIN_SUSPICIOUS_DENSITY * 0.85
+        and peak >= config.SUSPICION_TIER_MODERATE
+    )
+    if guided_scripted and promotion_gate and recovery < 0.55:
+        reasons.append(
+            f"guided explanation flow (guided {cog_guided:.2f}, "
+            f"low cognitive spontaneity {cog_spont:.2f})"
+        )
+        conf = "HIGH" if dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD else "MEDIUM"
+        return "PROBABLE_SCRIPT_READING", conf, reasons
+
     if scripted_dominant or peak_authority or density_authority:
         conf = "HIGH" if (
             dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD
@@ -175,6 +197,20 @@ def synthesize_final_decision(
         if drift >= config.LOW_DRIFT_SUSPICION_THRESHOLD:
             reasons.append("low long-term behavioral drift (globally stable delivery)")
         return "PROBABLE_SCRIPT_READING", conf, reasons
+
+    # --- Fluent natural cognition (Answer 3 target) ---
+    fluent_natural = (
+        cog_spont >= config.COGNITIVE_CLEAR_SPONTANEITY_MIN
+        and cog_guided <= config.COGNITIVE_CLEAR_GUIDED_MAX
+        and strong_n == 0
+        and peak < config.SUSPICION_TIER_STRONG
+    )
+    if fluent_natural and dom < config.DOMINANT_SCRIPT_READING_THRESHOLD:
+        reasons.append(
+            f"fluent natural cognition (spontaneity {cog_spont:.2f}, "
+            f"guided {cog_guided:.2f}) — delivery regularity not script evidence"
+        )
+        return "CLEAR", "LOW", reasons
 
     # --- False-positive guards (Answers 1, 3, 5) ---
     weak_dominant = (
@@ -312,4 +348,7 @@ def _empty_metrics() -> dict[str, Any]:
         "dominant_script_reading_score": 0.0,
         "natural_similarity_saturation_ratio": 0.0,
         "suspicion_momentum": 0.0,
+        "cognitive_spontaneity": 0.0,
+        "guided_explanation_index": 0.0,
+        "peak_cognitive_spontaneity": 0.0,
     }

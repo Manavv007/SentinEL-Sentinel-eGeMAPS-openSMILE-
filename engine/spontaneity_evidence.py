@@ -23,15 +23,21 @@ def spontaneity_suppression(
         "irregular_pacing": _irregular_pacing(features),
         "rate_fluctuation": _rate_fluctuation(features),
         "hesitation_cluster": _hesitation_cluster(features),
+        "semantic_repair": _semantic_repair(features),
+        "cognitive_wobble": _cognitive_wobble(features),
+        "retrieval_friction": _retrieval_friction_cog(features),
     }
 
     weights = {
-        "filler_burst": 0.18,
-        "retrieval_pause": 0.20,
-        "self_correction": 0.18,
-        "irregular_pacing": 0.18,
-        "rate_fluctuation": 0.14,
-        "hesitation_cluster": 0.12,
+        "filler_burst": 0.12,
+        "retrieval_pause": 0.14,
+        "self_correction": 0.12,
+        "irregular_pacing": 0.12,
+        "rate_fluctuation": 0.08,
+        "hesitation_cluster": 0.08,
+        "semantic_repair": 0.16,
+        "cognitive_wobble": 0.10,
+        "retrieval_friction": 0.08,
     }
 
     raw = sum(components[k] * weights[k] for k in components)
@@ -89,3 +95,15 @@ def _hesitation_cluster(features: dict[str, float]) -> float:
     if clusters >= 1 and 1.0 <= rate <= 6.0:
         return min(1.0, clusters / 3.0)
     return 0.0
+
+
+def _semantic_repair(features: dict[str, float]) -> float:
+    return min(1.0, float(features.get("cog_semantic_repair", 0.0)) * 1.15)
+
+
+def _cognitive_wobble(features: dict[str, float]) -> float:
+    return min(1.0, float(features.get("cog_cognitive_wobble", 0.0)))
+
+
+def _retrieval_friction_cog(features: dict[str, float]) -> float:
+    return min(1.0, float(features.get("cog_retrieval_friction", 0.0)))

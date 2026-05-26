@@ -22,13 +22,17 @@ class NaturalityScorer:
     """
 
     WEIGHTS = {
-        "self_correction": 0.18,
-        "retrieval_pause": 0.16,
-        "pause_entropy": 0.18,
-        "filler_dynamics": 0.16,
-        "rate_variance": 0.14,
-        "acoustic_dynamics": 0.08,
-        "low_script_overlap": 0.10,
+        "self_correction": 0.12,
+        "retrieval_pause": 0.12,
+        "pause_entropy": 0.12,
+        "filler_dynamics": 0.10,
+        "rate_variance": 0.08,
+        "acoustic_dynamics": 0.06,
+        "low_script_overlap": 0.08,
+        "retrieval_friction": 0.12,
+        "semantic_drift": 0.10,
+        "assembly_variance": 0.10,
+        "semantic_repair": 0.10,
     }
 
     def score(
@@ -45,6 +49,10 @@ class NaturalityScorer:
             "rate_variance": self._rate_variance(features),
             "acoustic_dynamics": self._acoustic_dynamics(features),
             "low_script_overlap": max(0.0, 1.0 - script_similarity),
+            "retrieval_friction": float(features.get("cog_retrieval_friction", 0.0)),
+            "semantic_drift": float(features.get("cog_semantic_drift", 0.0)),
+            "assembly_variance": float(features.get("cog_assembly_variance", 0.0)),
+            "semantic_repair": float(features.get("cog_semantic_repair", 0.0)),
         }
 
         raw = sum(components[k] * self.WEIGHTS[k] for k in self.WEIGHTS)
@@ -104,7 +112,13 @@ class NaturalityScorer:
             wps_score = 1.0 - min(1.0, abs(wps - 2.5) / 3.0)
         else:
             wps_score = 0.4
-        return 0.55 * gv + 0.45 * wps_score
+        base = 0.55 * gv + 0.45 * wps_score
+        # Fluent monotone pacing is not automatically non-spontaneous
+        wobble = float(features.get("cog_cognitive_wobble", 0.0))
+        repair = float(features.get("cog_semantic_repair", 0.0))
+        if gap_var < 0.006 and wobble + repair >= 0.35:
+            base = max(base, 0.48 + 0.35 * (wobble + repair))
+        return base
 
     @staticmethod
     def _acoustic_dynamics(features: dict[str, float]) -> float:

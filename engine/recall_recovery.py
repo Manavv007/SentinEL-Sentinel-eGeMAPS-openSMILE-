@@ -31,6 +31,9 @@ class WindowScoreRow:
     profile_confidence: float
     natural_update_reason: str
     natural_profile_updated: bool
+    cognitive_spontaneity: float = 0.0
+    guided_explanation: float = 0.0
+    cognitive_breakdown: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

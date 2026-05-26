@@ -61,26 +61,80 @@ def spontaneity_modulation_factor(
 def modulated_suspicion_score(
     *,
     script_similarity: float,
+    natural_similarity: float = 0.0,
     naturality_score: float,
     profile_confidence: float,
     suppression: float,
     technical_density: float,
     fake_natularity: float = 0.0,
+    cognitive_spontaneity: float = 0.0,
+    guided_explanation: float = 0.0,
+    fluency_trap: float = 0.0,
 ) -> float:
     """
     script_emphasis * spontaneity_modulation - bounded suppression.
     Replaces direct (script - natural) subtraction for ranking.
     """
-    script_emph = nonlinear_script_emphasis(script_similarity)
+    s = float(max(0.0, min(1.0, script_similarity)))
+    n_sim = float(max(0.0, min(1.0, natural_similarity)))
+
+    script_emph = nonlinear_script_emphasis(s)
     mod = spontaneity_modulation_factor(
         naturality_score=naturality_score,
-        script_similarity=script_similarity,
+        script_similarity=s,
         profile_confidence=profile_confidence,
         fake_natularity=fake_natularity,
     )
     tech_dampen = config.TECHNICAL_FLUENCY_DAMPENING * min(1.0, technical_density * 4.0)
-    raw = script_emph * mod
-    return float(max(0.0, raw - suppression - tech_dampen))
+
+    cog_spont = float(max(0.0, min(1.0, cognitive_spontaneity)))
+    guided = float(max(0.0, min(1.0, guided_explanation)))
+    trap = float(max(0.0, min(1.0, fluency_trap)))
+
+    # Cognitive spontaneity dampens script emphasis (fluent natural ≠ guided)
+    if cog_spont >= config.FLUENT_NATURAL_SPONTANEITY_FLOOR:
+        script_emph *= 1.0 - min(
+            config.COGNITIVE_SCRIPT_DAMPEN_AT_SPONTANEITY,
+            cog_spont * config.COGNITIVE_SCRIPT_DAMPEN_AT_SPONTANEITY,
+        )
+
+    # --- Dynamic range recovery (nonlinear amplification) ---
+    # When script similarity is already elevated, weak-looking contrastive values can still
+    # indicate guided speech. We amplify script emphasis nonlinearly but only in the mid/high
+    # script regime and when spontaneity isn't extremely high.
+    nat = float(max(0.0, min(1.0, naturality_score)))
+    if s >= 0.55 and nat <= 0.82 and cog_spont < 0.50:
+        x = (s - 0.55) / 0.45
+        amp = config.CONTRASTIVE_NONLINEAR_AMP * (x**config.CONTRASTIVE_NONLINEAR_POWER)
+        script_emph = min(1.25, script_emph * (1.0 + amp))
+
+    # --- Relative dominance scoring (script stronger than natural) ---
+    # Ratio > 1 means script profile fits better than natural profile.
+    # This adds separation without globally lowering thresholds.
+    ratio = s / max(n_sim, 0.08)
+    dominance_boost = 0.0
+    if ratio >= config.DOMINANCE_RATIO_MIN and s >= 0.55 and nat <= 0.85 and cog_spont < 0.52:
+        dominance_boost = min(
+            config.DOMINANCE_RATIO_MAX_BOOST,
+            (ratio - config.DOMINANCE_RATIO_MIN)
+            * config.DOMINANCE_RATIO_BOOST_PER_UNIT,
+        )
+
+    # --- Reduce oversuppression asymmetrically when script is high ---
+    # Strong script evidence should decay slower than weak suspicion. Here we soften suppression
+    # slightly when script is already elevated (does not remove spontaneity protection).
+    sup = float(suppression)
+    if s >= 0.55:
+        soft = min(0.35, (s - 0.55) / 0.45)
+        sup = sup * (1.0 - config.SUPPRESSION_SOFTENING_AT_HIGH_SCRIPT * soft)
+
+    from engine.cognitive_spontaneity import guided_explanation_boost as _guided_boost
+
+    raw = script_emph * mod + dominance_boost
+    raw += _guided_boost(guided, trap)
+    if trap >= 0.55 and cog_spont < 0.45:
+        raw += config.COGNITIVE_FLUENCY_TRAP_BOOST * trap
+    return float(max(0.0, raw - sup - tech_dampen))
 
 
 def window_temporal_weight(script_similarity: float, contrastive_score: float) -> float:

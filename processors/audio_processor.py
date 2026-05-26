@@ -71,6 +71,67 @@ class AudioProcessor:
         """Two-speaker interview → candidate answers with feature windows."""
         return self._process(video_path, ProcessingMode.INTERVIEW)
 
+    def extract_audio(self, video_path: str) -> str:
+        """Extract 16 kHz mono WAV; caller must delete the temp file."""
+        return self._extract_audio(video_path)
+
+    def process_interview_from_segmentation(
+        self,
+        video_path: str,
+        boundaries: list[dict[str, Any]],
+        *,
+        speaker_selection: dict[str, Any] | None = None,
+        wav_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Build interview answers locally after Kaggle returns candidate turn boundaries.
+        Skips local pyannote diarization (slow on CPU).
+        """
+        owns_wav = wav_path is None
+        if wav_path is None:
+            wav_path = self._extract_audio(video_path)
+        try:
+            waveform, _ = sf.read(wav_path, dtype="float32")
+            if waveform.ndim > 1:
+                waveform = waveform.mean(axis=1)
+            if speaker_selection is not None:
+                self.last_speaker_selection = speaker_selection
+
+            items = sorted(boundaries, key=lambda x: float(x.get("start_sec", 0)))
+            workers = min(config.AUDIO_WINDOW_PARALLEL_WORKERS, max(len(items), 1))
+
+            def _one(item: dict[str, Any]) -> dict[str, Any] | None:
+                start_sec = float(item["start_sec"])
+                end_sec = float(item["end_sec"])
+                if end_sec <= start_sec:
+                    return None
+                answer_id = int(item.get("answer_id", 0))
+                return {
+                    "answer_id": answer_id,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "audio_bytes": self._slice_audio_bytes(waveform, start_sec, end_sec),
+                    "windows": self._extract_windows(waveform, start_sec, end_sec),
+                }
+
+            answers: list[dict[str, Any]] = []
+            if workers <= 1 or len(items) <= 1:
+                for item in items:
+                    row = _one(item)
+                    if row:
+                        answers.append(row)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    rows = list(pool.map(_one, items))
+                answers = [r for r in rows if r is not None]
+            answers.sort(key=lambda a: a["start_sec"])
+            for i, ans in enumerate(answers):
+                ans["answer_id"] = i
+            return answers
+        finally:
+            if owns_wav:
+                Path(wav_path).unlink(missing_ok=True)
+
     # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------

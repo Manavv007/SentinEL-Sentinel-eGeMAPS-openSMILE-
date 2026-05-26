@@ -75,11 +75,13 @@ class TemporalEvidenceTracker:
         self._total_windows += 1
         ewma_before = self._ewma
 
+        cog_spont = float(debug.get("cognitive_spontaneity", 0.0))
         level = classify_suspicion_level(
             contrastive_score=contrastive_score,
             script_similarity=script_similarity,
             naturality_score=naturality_score,
             natural_similarity=natural_similarity,
+            cognitive_spontaneity=cog_spont,
         )
         evidence_units = nonlinear_level_contribution(
             level, contrastive_score, script_similarity
@@ -161,10 +163,19 @@ class TemporalEvidenceTracker:
                 "script_similarity": w.script_similarity,
                 "natural_similarity": w.natural_similarity,
                 "naturality_score": w.naturality_score,
+                "cognitive_spontaneity": float(w.debug.get("cognitive_spontaneity", 0.0)),
+                "guided_explanation_index": float(
+                    w.debug.get("guided_explanation_index", 0.0)
+                ),
             }
             for w in self._windows
         ]
         evidence = aggregate_answer_evidence(window_dicts)
+        avg_script_sim = (
+            float(sum(w["script_similarity"] for w in window_dicts)) / max(len(window_dicts), 1)
+            if window_dicts
+            else 0.0
+        )
 
         momentum_summary = self._momentum.summary()
         streak_boost = self._momentum.streak_composite_boost()
@@ -193,6 +204,14 @@ class TemporalEvidenceTracker:
             evidence["strong_ratio"] < 0.1
             and evidence["weighted_evidence"] < config.AMBIGUOUS_MIN_WEIGHTED_EVIDENCE * 1.5
         )
+        # If weak suspicion is dense and script similarity is elevated, do not treat as "weak-only benign".
+        if (
+            weak_only
+            and evidence.get("weak_ratio", 0.0) >= config.WEAK_CLUSTER_MIN_RATIO
+            and evidence.get("longest_weak_streak", 0.0) >= config.WEAK_CLUSTER_MIN_STREAK
+            and avg_script_sim >= config.WEAK_CLUSTER_MIN_AVG_SCRIPT_SIM
+        ):
+            weak_only = False
 
         status, confidence = resolve_answer_status(
             composite=composite,
@@ -210,6 +229,9 @@ class TemporalEvidenceTracker:
             duration_sec=duration,
             weak_only_dominant=weak_only,
             suspicion_momentum=float(momentum_summary.get("suspicion_momentum", 0)),
+            weak_ratio=float(evidence.get("weak_ratio", 0.0)),
+            longest_weak_streak=int(evidence.get("longest_weak_streak", 0.0)),
+            avg_script_similarity=float(avg_script_sim),
         )
 
         susp_ratio = (strong_count + mod_count + weak_count) / max(self._total_windows, 1)

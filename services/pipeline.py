@@ -90,6 +90,25 @@ def _startup_models(
     *,
     calibration: bool = False,
 ) -> KaggleGPUClient:
+    gpu_client = KaggleGPUClient(
+        base_url=config.KAGGLE_GPU_URL,
+        secret=config.SENTINEL_SECRET,
+        timeout=config.KAGGLE_GPU_TIMEOUT_SEC,
+    )
+    use_kaggle_asr = (
+        gpu_client.offload_active
+        and config.SKIP_LOCAL_WHISPER_WHEN_KAGGLE
+        and not calibration
+    )
+    if use_kaggle_asr:
+        log.log(
+            "startup",
+            "Kaggle GPU offload active — skipping local Whisper load for interview",
+            phase="system",
+            metrics={"kaggle_url": config.KAGGLE_GPU_URL},
+        )
+        return gpu_client
+
     if calibration and config.FAST_CALIBRATION:
         log.log(
             "startup",
@@ -107,11 +126,45 @@ def _startup_models(
             phase="system",
         )
         load_whisper_model()
-    return KaggleGPUClient(
-        base_url=config.KAGGLE_GPU_URL,
-        secret=config.SENTINEL_SECRET,
-        timeout=config.KAGGLE_GPU_TIMEOUT_SEC,
+    return gpu_client
+
+
+def _kaggle_prefetch_answers(
+    gpu_client: KaggleGPUClient,
+    answers: list[dict[str, Any]],
+    gpu_reading_profile: dict[str, Any] | None,
+    log: PipelineLogger,
+) -> list[tuple[dict[str, Any] | None, float | None]]:
+    """Parallel Kaggle transcription (+ GPU score when profile available)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    n = len(answers)
+    out: list[tuple[dict[str, Any] | None, float | None]] = [(None, None)] * n
+    workers = min(config.KAGGLE_PARALLEL_ANSWERS, max(n, 1))
+
+    def _one(idx: int, answer: dict[str, Any]) -> tuple[int, dict[str, Any] | None, float | None]:
+        duration = float(answer["end_sec"]) - float(answer["start_sec"])
+        audio = answer.get("audio_bytes", b"")
+        transcript, gpu = gpu_client.process_answer(
+            audio,
+            answer_id=int(answer["answer_id"]),
+            duration_sec=duration,
+            gpu_reading_profile=gpu_reading_profile,
+        )
+        return idx, transcript, gpu
+
+    log.log(
+        "kaggle_prefetch",
+        f"Offloading {n} answer(s) to Kaggle GPU (workers={workers})",
+        phase="analyze",
+        metrics={"parallel_workers": workers, "has_gpu_profile": bool(gpu_reading_profile)},
     )
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_one, i, a) for i, a in enumerate(answers)]
+        for fut in as_completed(futures):
+            idx, transcript, gpu = fut.result()
+            out[idx] = (transcript, gpu)
+    return out
 
 
 def _gpu_score(
@@ -196,13 +249,13 @@ def run_calibrate(
     gpu_reading_profile: dict | None = None
     if gpu_client.enabled:
         _emit(progress, 12, "GPU calibration (Kaggle)...", None)
-        for answer in answers:
-            audio = answer.get("audio_bytes", b"")
-            if not audio:
-                continue
-            gpu_result = gpu_client.calibrate(audio)
-            if gpu_result:
-                gpu_reading_profile = gpu_result
+        best = max(
+            answers,
+            key=lambda a: len(a.get("audio_bytes") or b""),
+            default=None,
+        )
+        if best and best.get("audio_bytes"):
+            gpu_reading_profile = gpu_client.calibrate(best["audio_bytes"])
         if gpu_reading_profile:
             log.log(
                 "gpu_calibrate",
@@ -388,24 +441,116 @@ def run_analyze(
             decision="Only high-naturality windows will update NATURAL profile.",
         )
 
-    _emit(progress, 12, "Processing interview audio...")
-    interview_answers = audio.process_interview(str(video))
+    use_kaggle_segment = gpu_client.offload_segmentation_active
+    if use_kaggle_segment:
+        log.log(
+            "kaggle_segment",
+            f"Kaggle segmentation ({config.KAGGLE_SEGMENT_MODE}) — local pyannote skipped",
+            phase="analyze",
+            metrics={
+                "kaggle_url": config.KAGGLE_GPU_URL,
+                "segment_mode": config.KAGGLE_SEGMENT_MODE,
+                "candidate_speaker": config.CANDIDATE_SPEAKER,
+                "segment_timeout_sec": config.KAGGLE_SEGMENT_TIMEOUT_SEC,
+                "skip_align": config.KAGGLE_SKIP_ALIGN_INTERVIEW,
+                "transcribe_only": config.KAGGLE_TRANSCRIBE_ONLY,
+            },
+        )
+    av_msg = (
+        f"Kaggle {config.KAGGLE_SEGMENT_MODE} segment + local windows (parallel w/ video)..."
+        if use_kaggle_segment
+        else "Processing interview audio + video (parallel)..."
+    )
+    _emit(progress, 12, av_msg)
+
+    def _run_audio() -> list[dict[str, Any]]:
+        if not use_kaggle_segment:
+            return audio.process_interview(str(video))
+
+        wav_path = audio.extract_audio(str(video))
+        try:
+            t_seg = time.perf_counter()
+            segment_payload = gpu_client.segment_interview(str(video), wav_path=wav_path)
+            seg_sec = round(time.perf_counter() - t_seg, 2)
+            answers_payload = (segment_payload or {}).get("answers") or []
+
+            if not answers_payload:
+                seg_err = (segment_payload or {}).get("error") if segment_payload else None
+                log.log(
+                    "kaggle_segment",
+                    "Kaggle /segment_interview failed or empty — falling back to local pyannote",
+                    phase="analyze",
+                    level="warning",
+                    metrics={
+                        "elapsed_sec": seg_sec,
+                        "kaggle_error": seg_err,
+                        "kaggle_error_type": (segment_payload or {}).get("error_type"),
+                    },
+                    decision=str(seg_err)[:200] if seg_err else None,
+                )
+                return audio.process_interview(str(video))
+
+            log.log(
+                "kaggle_segment",
+                f"Kaggle segment: {len(answers_payload)} answer(s) ({seg_sec}s)",
+                phase="analyze",
+                metrics={
+                    "answers": len(answers_payload),
+                    "elapsed_sec": seg_sec,
+                    "segmentation_backend": (segment_payload or {}).get(
+                        "segmentation_backend"
+                    ),
+                    "speaker_selection": (segment_payload or {}).get("speaker_selection"),
+                },
+                decision=f"candidate_track={config.CANDIDATE_SPEAKER}",
+            )
+            return audio.process_interview_from_segmentation(
+                str(video),
+                answers_payload,
+                speaker_selection=(segment_payload or {}).get("speaker_selection"),
+                wav_path=wav_path,
+            )
+        finally:
+            Path(wav_path).unlink(missing_ok=True)
+
+    def _run_video() -> dict[str, Any]:
+        return video_proc.process_video(
+            str(video), timeline_fps=config.VIDEO_INTERVIEW_FPS
+        )
+
+    t_av = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        audio_future = pool.submit(_run_audio)
+        video_future = pool.submit(_run_video)
+        interview_answers = audio_future.result()
+        video_result = video_future.result()
+    av_sec = round(time.perf_counter() - t_av, 2)
+
     speaker_sel = audio.last_speaker_selection or {}
     log.log(
         "audio",
-        f"Interview: {len(interview_answers)} answer segment(s)",
+        f"Interview: {len(interview_answers)} answer segment(s) ({av_sec}s, parallel w/ video)",
         phase="analyze",
         metrics={
             "answers": len(interview_answers),
             "candidate_speaker_strategy": config.CANDIDATE_SPEAKER,
             "speaker_selection": speaker_sel,
+            "elapsed_sec": av_sec,
         },
         decision=f"candidate_track={speaker_sel.get('strategy', config.CANDIDATE_SPEAKER)}",
     )
 
-    _emit(progress, 28, "Processing interview video...")
-    video_result = video_proc.process_video(str(video))
     timeline = video_result["timeline"]
+
+    kaggle_cache: list[tuple[dict[str, Any] | None, float | None]] | None = None
+    if gpu_client.offload_active and interview_answers:
+        _emit(progress, 28, "Kaggle GPU transcription (parallel)...")
+        kaggle_cache = _kaggle_prefetch_answers(
+            gpu_client,
+            interview_answers,
+            gpu_reading_profile,
+            log,
+        )
 
     results_answers: list[dict] = []
     n_answers = max(len(interview_answers), 1)
@@ -417,12 +562,36 @@ def run_analyze(
 
         ac_score, ac_breakdown = engine.score_answer(answer["windows"], reading_profile)
         duration = float(answer["end_sec"]) - float(answer["start_sec"])
-        transcript = transcript_proc.transcribe_answer(
-            answer_id=answer["answer_id"],
-            audio_bytes=answer.get("audio_bytes", b""),
-            start_sec=answer["start_sec"],
-            end_sec=answer["end_sec"],
-        )
+
+        gpu: float | None = None
+        if kaggle_cache is not None:
+            transcript, gpu = kaggle_cache[idx]
+            if transcript is None:
+                log.log(
+                    "kaggle_transcribe",
+                    f"Kaggle failed for answer {aid} — falling back to local Whisper",
+                    phase="analyze",
+                    level="warning",
+                )
+                transcript = transcript_proc.transcribe_answer(
+                    answer_id=answer["answer_id"],
+                    audio_bytes=answer.get("audio_bytes", b""),
+                    start_sec=answer["start_sec"],
+                    end_sec=answer["end_sec"],
+                )
+        else:
+            transcript = transcript_proc.transcribe_answer(
+                answer_id=answer["answer_id"],
+                audio_bytes=answer.get("audio_bytes", b""),
+                start_sec=answer["start_sec"],
+                end_sec=answer["end_sec"],
+            )
+            gpu = _gpu_score(
+                gpu_client,
+                answer.get("audio_bytes", b""),
+                gpu_reading_profile or {},
+                duration,
+            )
         tech_density = _answer_technical_density(transcript)
         ac_score = AnalysisEngine.calibrate_channel_score(
             ac_score,
@@ -438,13 +607,12 @@ def run_analyze(
         ling_score, ling_breakdown = linguistic_analyzer.analyze(
             transcript, linguistic_calibration
         )
+        if config.ENABLE_COGNITIVE_SPONTANEITY:
+            from engine.cognitive_spontaneity import dampen_linguistic_fluency_score
 
-        gpu = _gpu_score(
-            gpu_client,
-            answer.get("audio_bytes", b""),
-            gpu_reading_profile or {},
-            duration,
-        )
+            ling_score = dampen_linguistic_fluency_score(
+                ling_score, transcript, duration
+            )
 
         fused = scorer.score_answer(
             answer_id=answer["answer_id"],

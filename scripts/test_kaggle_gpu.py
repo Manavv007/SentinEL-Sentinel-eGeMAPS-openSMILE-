@@ -24,6 +24,13 @@ def main() -> int:
         print("Health:", health)
         if health.get("status") == "ok":
             print("OK — Kaggle GPU server is live.")
+            if health.get("segment_interview"):
+                print("  /segment_interview endpoint advertised.")
+            else:
+                print(
+                    "  WARN: Re-run Kaggle Cell 2 after notebook update "
+                    "to enable /segment_interview (pyannote diarization)."
+                )
             return 0
         print("Unexpected health response.")
         return 2

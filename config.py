@@ -221,6 +221,18 @@ PROBABLE_MIN_CONSECUTIVE_STRONG: int = int(_get_float("PROBABLE_MIN_CONSECUTIVE_
 PROBABLE_MIN_COMPOSITE_RATIO: float = _get_float("PROBABLE_MIN_COMPOSITE_RATIO", 0.95)
 HIGH_MIN_WEIGHTED_EVIDENCE: float = _get_float("HIGH_MIN_WEIGHTED_EVIDENCE", 5.5)
 AMBIGUOUS_MIN_WEIGHTED_EVIDENCE: float = _get_float("AMBIGUOUS_MIN_WEIGHTED_EVIDENCE", 1.2)
+WEAK_CLUSTER_MIN_RATIO: float = _get_float("WEAK_CLUSTER_MIN_RATIO", 0.55)
+WEAK_CLUSTER_MIN_STREAK: int = int(_get_float("WEAK_CLUSTER_MIN_STREAK", 3))
+WEAK_CLUSTER_MIN_AVG_SCRIPT_SIM: float = _get_float("WEAK_CLUSTER_MIN_AVG_SCRIPT_SIM", 0.58)
+WEAK_CLUSTER_AMBIGUOUS_COMPOSITE_RATIO: float = _get_float(
+    "WEAK_CLUSTER_AMBIGUOUS_COMPOSITE_RATIO", 0.72
+)
+WEAK_CLUSTER_PROBABLE_COMPOSITE_RATIO: float = _get_float(
+    "WEAK_CLUSTER_PROBABLE_COMPOSITE_RATIO", 0.88
+)
+WEAK_CLUSTER_PROBABLE_MIN_MOMENTUM: float = _get_float(
+    "WEAK_CLUSTER_PROBABLE_MIN_MOMENTUM", 0.48
+)
 
 # --- Temporal persistence (momentum + context-aware decay) ---
 MOMENTUM_LOOKBACK_WINDOWS: int = int(_get_float("MOMENTUM_LOOKBACK_WINDOWS", 6))
@@ -264,6 +276,20 @@ CONTRASTIVE_NATURAL_WEIGHT: float = _get_float("CONTRASTIVE_NATURAL_WEIGHT", 0.3
 SPONTANEITY_SUPPRESSION_SCALE: float = _get_float("SPONTANEITY_SUPPRESSION_SCALE", 0.25)
 TECHNICAL_FLUENCY_DAMPENING: float = _get_float("TECHNICAL_FLUENCY_DAMPENING", 0.15)
 
+# --- Contrastive separation recovery (dynamic range) ---
+CONTRASTIVE_NONLINEAR_AMP: float = _get_float("CONTRASTIVE_NONLINEAR_AMP", 0.35)
+CONTRASTIVE_NONLINEAR_POWER: float = _get_float("CONTRASTIVE_NONLINEAR_POWER", 1.6)
+SUPPRESSION_SOFTENING_AT_HIGH_SCRIPT: float = _get_float(
+    "SUPPRESSION_SOFTENING_AT_HIGH_SCRIPT", 0.25
+)
+
+# Relative dominance: script_similarity / natural_similarity
+DOMINANCE_RATIO_MIN: float = _get_float("DOMINANCE_RATIO_MIN", 1.22)
+DOMINANCE_RATIO_BOOST_PER_UNIT: float = _get_float(
+    "DOMINANCE_RATIO_BOOST_PER_UNIT", 0.045
+)
+DOMINANCE_RATIO_MAX_BOOST: float = _get_float("DOMINANCE_RATIO_MAX_BOOST", 0.09)
+
 # Naturality score shaping
 NATURALITY_SIGMOID_CENTER: float = _get_float("NATURALITY_SIGMOID_CENTER", 0.32)
 NATURALITY_SIGMOID_STEEPNESS: float = _get_float("NATURALITY_SIGMOID_STEEPNESS", 5.0)
@@ -295,6 +321,32 @@ def _get_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+# --- Cognitive spontaneity vs guided explanation ---
+ENABLE_COGNITIVE_SPONTANEITY: bool = _get_bool("ENABLE_COGNITIVE_SPONTANEITY", True)
+COGNITIVE_SPONTANEITY_SUPPRESSION_WEIGHT: float = _get_float(
+    "COGNITIVE_SPONTANEITY_SUPPRESSION_WEIGHT", 0.22
+)
+COGNITIVE_REPAIR_SUPPRESSION_WEIGHT: float = _get_float(
+    "COGNITIVE_REPAIR_SUPPRESSION_WEIGHT", 0.14
+)
+COGNITIVE_MAX_EXTRA_SUPPRESSION: float = _get_float("COGNITIVE_MAX_EXTRA_SUPPRESSION", 0.28)
+COGNITIVE_GUIDED_BOOST_MIN: float = _get_float("COGNITIVE_GUIDED_BOOST_MIN", 0.52)
+COGNITIVE_GUIDED_BOOST_SCALE: float = _get_float("COGNITIVE_GUIDED_BOOST_SCALE", 0.12)
+COGNITIVE_GUIDED_MAX_BOOST: float = _get_float("COGNITIVE_GUIDED_MAX_BOOST", 0.10)
+COGNITIVE_GUIDED_HIGH_THRESHOLD: float = _get_float("COGNITIVE_GUIDED_HIGH_THRESHOLD", 0.58)
+COGNITIVE_NATURALITY_BLEND: float = _get_float("COGNITIVE_NATURALITY_BLEND", 0.18)
+COGNITIVE_SCRIPT_DAMPEN_AT_SPONTANEITY: float = _get_float(
+    "COGNITIVE_SCRIPT_DAMPEN_AT_SPONTANEITY", 0.20
+)
+COGNITIVE_FLUENCY_TRAP_BOOST: float = _get_float("COGNITIVE_FLUENCY_TRAP_BOOST", 0.08)
+FLUENT_NATURAL_SPONTANEITY_FLOOR: float = _get_float("FLUENT_NATURAL_SPONTANEITY_FLOOR", 0.50)
+FLUENT_LINGUISTIC_DAMPEN: float = _get_float("FLUENT_LINGUISTIC_DAMPEN", 0.22)
+COGNITIVE_CLEAR_SPONTANEITY_MIN: float = _get_float("COGNITIVE_CLEAR_SPONTANEITY_MIN", 0.48)
+COGNITIVE_CLEAR_GUIDED_MAX: float = _get_float("COGNITIVE_CLEAR_GUIDED_MAX", 0.45)
+WEAK_SUSPICION_COGNITIVE_SPONTANEITY_CAP: float = _get_float(
+    "WEAK_SUSPICION_COGNITIVE_SPONTANEITY_CAP", 0.55
+)
+
 # Skip pyannote for calibration (single speaker reading) — saves ~30-90s
 FAST_CALIBRATION: bool = _get_bool("FAST_CALIBRATION", True)
 SKIP_DIARIZATION_CALIBRATION: bool = _get_bool("SKIP_DIARIZATION_CALIBRATION", True)
@@ -310,6 +362,27 @@ VIDEO_CALIBRATION_FPS: float = _get_float("VIDEO_CALIBRATION_FPS", 5.0)
 
 # Preload Whisper when web server starts (first job avoids 30-60s model load)
 PRELOAD_MODELS_ON_STARTUP: bool = _get_bool("PRELOAD_MODELS_ON_STARTUP", True)
+
+# Kaggle GPU offload — skip slow local Whisper when notebook is configured
+KAGGLE_CALIBRATE_TIMEOUT_SEC: int = int(_get_float("KAGGLE_CALIBRATE_TIMEOUT_SEC", 600))
+KAGGLE_OFFLOAD: bool = _get_bool("KAGGLE_OFFLOAD", bool(KAGGLE_GPU_URL))
+KAGGLE_OFFLOAD_TRANSCRIPTION: bool = _get_bool("KAGGLE_OFFLOAD_TRANSCRIPTION", True)
+KAGGLE_PARALLEL_ANSWERS: int = max(1, int(_get_float("KAGGLE_PARALLEL_ANSWERS", 4)))
+SKIP_LOCAL_WHISPER_WHEN_KAGGLE: bool = _get_bool("SKIP_LOCAL_WHISPER_WHEN_KAGGLE", True)
+KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool(
+    "KAGGLE_OFFLOAD_SEGMENTATION", bool(KAGGLE_GPU_URL)
+)
+KAGGLE_SEGMENT_TIMEOUT_SEC: int = int(_get_float("KAGGLE_SEGMENT_TIMEOUT_SEC", 900))
+# fast = Silero VAD + long-turn filter (~10–30s); pyannote = accurate but slow (minutes)
+KAGGLE_SEGMENT_MODE: str = _get_str("KAGGLE_SEGMENT_MODE", "pyannote").lower()
+KAGGLE_FAST_MIN_CANDIDATE_SEC: float = _get_float("KAGGLE_FAST_MIN_CANDIDATE_SEC", 3.0)
+KAGGLE_SKIP_ALIGN_INTERVIEW: bool = _get_bool("KAGGLE_SKIP_ALIGN_INTERVIEW", True)
+# When true, prefetch uses /transcribe_answer only (faster than /analyze_batch per answer)
+KAGGLE_TRANSCRIBE_ONLY: bool = _get_bool("KAGGLE_TRANSCRIBE_ONLY", False)
+VIDEO_INTERVIEW_FPS: float = _get_float("VIDEO_INTERVIEW_FPS", 5.0)
+AUDIO_WINDOW_PARALLEL_WORKERS: int = max(
+    1, int(_get_float("AUDIO_WINDOW_PARALLEL_WORKERS", 4))
+)
 
 # --- Interview speaker selection (pyannote diarization) ---
 # most_speech   — speaker with highest total talk time (legacy default)

@@ -23,6 +23,11 @@ from engine.recall_recovery import (
     natural_profile_confidence,
     should_update_natural_profile,
 )
+from engine.cognitive_spontaneity import (
+    cognitive_spontaneity_suppression,
+    compute_answer_cognitive_profile,
+    score_cognitive_dimensions,
+)
 from engine.scoring_v3 import modulated_suspicion_score
 from engine.spontaneity_evidence import spontaneity_suppression
 from engine.temporal_evidence import TemporalEvidenceTracker
@@ -143,6 +148,11 @@ class ContrastiveEngine:
         answer_end = float(answer.get("end_sec", answer_start))
         answer_duration = max(answer_end - answer_start, 0.0)
         answer_tech_density = _answer_technical_density(transcript)
+        answer_cognitive = (
+            compute_answer_cognitive_profile(transcript)
+            if config.ENABLE_COGNITIVE_SPONTANEITY
+            else {}
+        )
 
         prev_pitch: float | None = None
         pending: list[WindowScoreRow] = []
@@ -166,6 +176,7 @@ class ContrastiveEngine:
                 pitch_delta=pitch_delta,
                 answer_start_sec=answer_start,
                 answer_end_sec=answer_end,
+                answer_cognitive_profile=answer_cognitive or None,
             )
             tech_density = float(
                 features.get("ling_technical_density", answer_tech_density)
@@ -191,6 +202,20 @@ class ContrastiveEngine:
                 technical_density=tech_density,
             )
             suppression, _sup_breakdown = spontaneity_suppression(features, nat_breakdown)
+            cog_spont, cog_guided, cog_breakdown = (0.0, 0.0, {})
+            if config.ENABLE_COGNITIVE_SPONTANEITY:
+                cog_spont, cog_guided, cog_breakdown = score_cognitive_dimensions(
+                    features, answer_cognitive
+                )
+                suppression = min(
+                    1.0,
+                    suppression
+                    + cognitive_spontaneity_suppression(cog_spont, cog_guided, features),
+                )
+                naturality = min(
+                    1.0,
+                    naturality + config.COGNITIVE_NATURALITY_BLEND * cog_spont,
+                )
             if script_sim >= config.SCRIPT_DOMINANCE_THRESHOLD:
                 suppression = min(suppression, config.SCRIPT_DOMINANCE_MAX_SUPPRESSION)
 
@@ -235,10 +260,14 @@ class ContrastiveEngine:
 
             contrastive_base = modulated_suspicion_score(
                 script_similarity=script_sim,
+                natural_similarity=natural_eff,
                 naturality_score=naturality,
                 profile_confidence=self._profile_confidence(),
                 suppression=suppression,
                 technical_density=tech_density,
+                cognitive_spontaneity=cog_spont,
+                guided_explanation=cog_guided,
+                fluency_trap=float(features.get("cog_fluency_trap", 0.0)),
             )
 
             pending.append(
@@ -259,6 +288,9 @@ class ContrastiveEngine:
                     profile_confidence=self._profile_confidence(),
                     natural_update_reason=update_reason,
                     natural_profile_updated=profile_updated,
+                    cognitive_spontaneity=cog_spont,
+                    guided_explanation=cog_guided,
+                    cognitive_breakdown=cog_breakdown,
                 )
             )
 
@@ -281,6 +313,7 @@ class ContrastiveEngine:
             contrastive = max(
                 modulated_suspicion_score(
                     script_similarity=row.script_similarity,
+                    natural_similarity=row.natural_similarity_effective,
                     naturality_score=row.naturality_score,
                     profile_confidence=row.profile_confidence,
                     suppression=suppression,
@@ -288,6 +321,9 @@ class ContrastiveEngine:
                         row.features.get("ling_technical_density", answer_tech_density)
                     ),
                     fake_natularity=horizon.fake_natularity_score,
+                    cognitive_spontaneity=row.cognitive_spontaneity,
+                    guided_explanation=row.guided_explanation,
+                    fluency_trap=float(row.features.get("cog_fluency_trap", 0.0)),
                 )
                 + boost,
                 horizon.answer_contrastive_floor * 0.5,
@@ -351,6 +387,9 @@ class ContrastiveEngine:
                 "scoring_formula": (
                     "nonlinear_script * (1 - spontaneity_modulation) - suppression + boost"
                 ),
+                "cognitive_spontaneity": round(row.cognitive_spontaneity, 6),
+                "guided_explanation_index": round(row.guided_explanation, 6),
+                "cognitive_breakdown": row.cognitive_breakdown,
             }
 
             ev = tracker.observe(
@@ -392,6 +431,8 @@ class ContrastiveEngine:
             [u for u in self._profile_update_logs if u.get("answer_id") == answer.get("answer_id")]
         )
         summary["profile_health"] = profile_health(self.script_profile, self.natural_profile)
+        if answer_cognitive:
+            summary["cognitive_profile"] = answer_cognitive
         purity_state = self._natural_store.compute_purity(self.script_profile)
         summary["natural_profile_purity"] = {
             "purity_score": purity_state.purity_score,

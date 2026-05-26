@@ -9,6 +9,11 @@ import numpy as np
 
 from engine.linguistic_analyzer import LinguisticAnalyzer
 
+try:
+    from engine.cognitive_spontaneity import extract_window_cognitive_features
+except ImportError:
+    extract_window_cognitive_features = None  # type: ignore[misc, assignment]
+
 FILLER_RE = re.compile(
     r"\b(um|uh|er|ah|hmm|like|you know|i mean|sort of|kind of|basically|literally)\b",
     re.I,
@@ -132,6 +137,7 @@ def build_window_features(
     pitch_delta: float | None = None,
     answer_start_sec: float | None = None,
     answer_end_sec: float | None = None,
+    answer_cognitive_profile: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Merge acoustic, linguistic, and video features for one temporal window."""
     feats: dict[str, float] = {}
@@ -154,6 +160,18 @@ def build_window_features(
         if ling:
             ling["ling_scope_fallback"] = 1.0
     feats.update(ling)
+    if extract_window_cognitive_features is not None and ling:
+        import config as _cfg
+
+        if _cfg.ENABLE_COGNITIVE_SPONTANEITY:
+            feats.update(
+                extract_window_cognitive_features(
+                    transcript,
+                    start_sec=ling_start,
+                    end_sec=ling_end,
+                    answer_profile=answer_cognitive_profile,
+                )
+            )
     feats.update(extract_video_features(timeline_slice))
     if pitch_delta is not None and np.isfinite(pitch_delta):
         feats["acoustic_pitch_delta"] = float(pitch_delta)

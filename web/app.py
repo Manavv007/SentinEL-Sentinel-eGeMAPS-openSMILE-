@@ -110,6 +110,18 @@ async def _warmup_models() -> None:
 
 def _preload_sync() -> None:
     try:
+        import config as cfg
+
+        if (
+            cfg.KAGGLE_OFFLOAD
+            and cfg.KAGGLE_OFFLOAD_TRANSCRIPTION
+            and cfg.SKIP_LOCAL_WHISPER_WHEN_KAGGLE
+            and cfg.KAGGLE_GPU_URL
+        ):
+            logging.getLogger(__name__).info(
+                "Skipping local Whisper preload — Kaggle GPU offload enabled"
+            )
+            return
         from processors.transcript_processor import preload_models
 
         preload_models()
