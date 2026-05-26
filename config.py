@@ -1,0 +1,324 @@
+"""SentinEL configuration loaded from environment variables."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_ENV_PATH)
+
+# WhisperX → pyannote → speechbrain: Windows k2_fsa lazy-import crash guard
+try:
+    from utils.speechbrain_patch import apply_speechbrain_windows_patch
+
+    apply_speechbrain_windows_patch()
+except Exception:
+    pass
+
+
+def _require(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _get_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return float(raw)
+
+
+def _get_str(name: str, default: str) -> str:
+    return os.getenv(name, default).strip() or default
+
+
+# --- Secrets & endpoints ---
+HF_TOKEN: str = _require("HF_TOKEN")
+
+# Optional override for CLI / web launcher
+SENTINEL_PYTHON: str = os.getenv("SENTINEL_PYTHON", "").strip()
+
+# Remove or leave blank — not used in local CPU mode
+KAGGLE_GPU_URL: str = os.getenv("KAGGLE_GPU_URL", "").strip()
+SENTINEL_SECRET: str = (
+    os.getenv("SENTINEL_SECRET", "").strip()
+    or os.getenv("KAGGLE_SECRET", "").strip()
+)
+KAGGLE_GPU_TIMEOUT_SEC: int = int(_get_float("KAGGLE_GPU_TIMEOUT_SEC", 180))
+
+# --- Tunable detection parameters ---
+ALERT_THRESHOLD: float = _get_float("ALERT_THRESHOLD", 0.55)
+STD_FLOOR: float = _get_float("STD_FLOOR", 0.05)
+EWMA_ALPHA_ATTACK: float = _get_float("EWMA_ALPHA_ATTACK", 0.75)
+EWMA_ALPHA_DECAY: float = _get_float("EWMA_ALPHA_DECAY", 0.15)
+
+# ── Whisper model size guide ──────────────────────────────────────
+# tiny   : ~1s/answer  · lowest accuracy · good for quick testing
+# base   : ~2s/answer  · low accuracy    · okay for testing
+# small  : ~4s/answer  · good accuracy   · RECOMMENDED for CPU
+# medium : ~10s/answer · better accuracy · use if small misses fillers
+# large-v3: too slow on CPU without GPU  · use Kaggle notebook instead
+# ─────────────────────────────────────────────────────────────────
+
+# Whisper settings — optimised for CPU with int8 quantization
+WHISPER_MODEL_SIZE: str = _get_str("WHISPER_MODEL_SIZE", "small")
+WHISPER_DEVICE: str = _get_str("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE: str = _get_str("WHISPER_COMPUTE_TYPE", "int8")
+
+# --- Feature weights (normalised to sum to 1.0 in FusedScorer) ---
+WEIGHT_ACOUSTIC: float = _get_float("WEIGHT_ACOUSTIC", 0.2625)
+WEIGHT_LINGUISTIC: float = _get_float("WEIGHT_LINGUISTIC", 0.2625)
+WEIGHT_GAZE: float = _get_float("WEIGHT_GAZE", 0.2625)
+WEIGHT_LIP: float = _get_float("WEIGHT_LIP", 0.2125)
+
+# --- Dual-profile contrastive engine (v5) ---
+ENABLE_CONTRASTIVE_ENGINE: bool = os.getenv("ENABLE_CONTRASTIVE_ENGINE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ENABLE_DYNAMIC_NATURAL_PROFILE: bool = os.getenv(
+    "ENABLE_DYNAMIC_NATURAL_PROFILE", "true"
+).lower() in ("1", "true", "yes")
+
+NATURAL_PROFILE_MIN_SAMPLES: int = int(_get_float("NATURAL_PROFILE_MIN_SAMPLES", 2))
+PROFILE_MAX_SAMPLES_PER_METRIC: int = int(_get_float("PROFILE_MAX_SAMPLES_PER_METRIC", 500))
+TRANSITION_ALERT_THRESHOLD: float = _get_float("TRANSITION_ALERT_THRESHOLD", 0.5)
+MIN_ANSWER_SEC_FOR_HIGH: float = _get_float("MIN_ANSWER_SEC_FOR_HIGH", 8.0)
+PAUSE_ENTROPY_NORM: float = _get_float("PAUSE_ENTROPY_NORM", 2.5)
+
+# --- Scoring calibration (false-positive reduction) ---
+# Legacy label; profile learning uses NATURALITY_LEARNING_THRESHOLD (stricter)
+NATURALITY_UPDATE_THRESHOLD: float = _get_float("NATURALITY_UPDATE_THRESHOLD", 0.38)
+NATURAL_UPDATE_FLUENT_SCRIPT_CEILING: float = _get_float(
+    "NATURAL_UPDATE_FLUENT_SCRIPT_CEILING", 0.52
+)
+
+# NATURAL similarity saturation control
+NATURAL_SIMILARITY_CAP: float = _get_float("NATURAL_SIMILARITY_CAP", 0.82)
+NATURAL_PROFILE_CONFIDENCE_FLOOR: float = _get_float("NATURAL_PROFILE_CONFIDENCE_FLOOR", 0.38)
+
+# --- NATURAL profile purity / anti-dilution ---
+# Scoring uses naturality_score; profile learning uses stricter naturality_for_learning
+NATURALITY_LEARNING_THRESHOLD: float = _get_float("NATURALITY_LEARNING_THRESHOLD", 0.52)
+NATURAL_UPDATE_MAX_SCRIPT_SIM: float = _get_float("NATURAL_UPDATE_MAX_SCRIPT_SIM", 0.55)
+NATURAL_UPDATE_MIN_SPONTANEITY_SIGNALS: int = int(
+    _get_float("NATURAL_UPDATE_MIN_SPONTANEITY_SIGNALS", 4)
+)
+NATURAL_UPDATE_MIN_STRONG_CATEGORIES: int = int(
+    _get_float("NATURAL_UPDATE_MIN_STRONG_CATEGORIES", 3)
+)
+NATURAL_UPDATE_MIN_PAUSE_ENTROPY: float = _get_float("NATURAL_UPDATE_MIN_PAUSE_ENTROPY", 0.65)
+NATURAL_UPDATE_MAX_TECHNICAL_DENSITY: float = _get_float(
+    "NATURAL_UPDATE_MAX_TECHNICAL_DENSITY", 0.12
+)
+NATURAL_UPDATE_TECHNICAL_EXTRA_STRONG: int = int(
+    _get_float("NATURAL_UPDATE_TECHNICAL_EXTRA_STRONG", 1)
+)
+NATURAL_PROFILE_MAX_STORED_SAMPLES: int = int(
+    _get_float("NATURAL_PROFILE_MAX_STORED_SAMPLES", 36)
+)
+NATURAL_PROFILE_MAX_SAMPLES_PER_METRIC: int = int(
+    _get_float("NATURAL_PROFILE_MAX_SAMPLES_PER_METRIC", 48)
+)
+NATURAL_PROFILE_MIN_LEARNING_CONFIDENCE: float = _get_float(
+    "NATURAL_PROFILE_MIN_LEARNING_CONFIDENCE", 0.62
+)
+NATURAL_PROFILE_DIVERSITY_MIN_DISTANCE: float = _get_float(
+    "NATURAL_PROFILE_DIVERSITY_MIN_DISTANCE", 0.08
+)
+NATURAL_PROFILE_SAMPLE_MAX_AGE_ANSWERS: int = int(
+    _get_float("NATURAL_PROFILE_SAMPLE_MAX_AGE_ANSWERS", 8)
+)
+NATURAL_PROFILE_FORGET_LOW_CONF_AGE: int = int(
+    _get_float("NATURAL_PROFILE_FORGET_LOW_CONF_AGE", 4)
+)
+NATURAL_SIMILARITY_SATURATION_WINDOW: int = int(
+    _get_float("NATURAL_SIMILARITY_SATURATION_WINDOW", 24)
+)
+NATURAL_SIMILARITY_SATURATION_MEAN: float = _get_float(
+    "NATURAL_SIMILARITY_SATURATION_MEAN", 0.72
+)
+NATURAL_SIMILARITY_SATURATION_PENALTY: float = _get_float(
+    "NATURAL_SIMILARITY_SATURATION_PENALTY", 0.18
+)
+NATURAL_PROFILE_PURITY_COLLAPSE: float = _get_float("NATURAL_PROFILE_PURITY_COLLAPSE", 0.42)
+NATURAL_PROFILE_UPDATE_RATE_WARN: float = _get_float(
+    "NATURAL_PROFILE_UPDATE_RATE_WARN", 0.35
+)
+
+# Script dominance override (recall recovery)
+SCRIPT_DOMINANCE_THRESHOLD: float = _get_float("SCRIPT_DOMINANCE_THRESHOLD", 0.70)
+SCRIPT_DOMINANCE_MIN_WINDOWS: int = int(_get_float("SCRIPT_DOMINANCE_MIN_WINDOWS", 3))
+SCRIPT_DOMINANCE_BOOST: float = _get_float("SCRIPT_DOMINANCE_BOOST", 0.16)
+SCRIPT_DOMINANCE_MAX_SUPPRESSION: float = _get_float("SCRIPT_DOMINANCE_MAX_SUPPRESSION", 0.10)
+PER_WINDOW_SCRIPT_BOOST: float = _get_float("PER_WINDOW_SCRIPT_BOOST", 0.04)
+SCRIPT_NATURAL_COLLAPSE_BOOST: float = _get_float("SCRIPT_NATURAL_COLLAPSE_BOOST", 0.08)
+
+# Long-horizon consistency (20–40s)
+LONG_HORIZON_MIN_SEC: float = _get_float("LONG_HORIZON_MIN_SEC", 20.0)
+LOW_DRIFT_SUSPICION_THRESHOLD: float = _get_float("LOW_DRIFT_SUSPICION_THRESHOLD", 0.58)
+LOW_DRIFT_BOOST: float = _get_float("LOW_DRIFT_BOOST", 0.10)
+CLEANLINESS_SUSPICION_THRESHOLD: float = _get_float("CLEANLINESS_SUSPICION_THRESHOLD", 0.62)
+CLEANLINESS_BOOST: float = _get_float("CLEANLINESS_BOOST", 0.08)
+FAKE_NATURALITY_THRESHOLD: float = _get_float("FAKE_NATURALITY_THRESHOLD", 0.55)
+FAKE_NATURALITY_BOOST: float = _get_float("FAKE_NATURALITY_BOOST", 0.07)
+FAKE_NATURALITY_MAX_SUPPRESSION: float = _get_float("FAKE_NATURALITY_MAX_SUPPRESSION", 0.08)
+ANSWER_CONTRASTIVE_FLOOR_MAX: float = _get_float("ANSWER_CONTRASTIVE_FLOOR_MAX", 0.22)
+ANSWER_FLOOR_SCALE: float = _get_float("ANSWER_FLOOR_SCALE", 0.85)
+
+# Sustained moderate suspicion → gradual EWMA climb
+SUSTAINED_MODERATE_RATIO: float = _get_float("SUSTAINED_MODERATE_RATIO", 0.40)
+SUSTAINED_EWMA_BOOST_PER_WINDOW: float = _get_float("SUSTAINED_EWMA_BOOST_PER_WINDOW", 0.025)
+
+# --- Third-pass: modulated scoring + asymmetric temporal aggregation ---
+STRONG_SCRIPT_THRESHOLD: float = _get_float("STRONG_SCRIPT_THRESHOLD", 0.68)
+STRONG_SCRIPT_NONLINEAR_GAIN: float = _get_float("STRONG_SCRIPT_NONLINEAR_GAIN", 0.22)
+STRONG_SCRIPT_NONLINEAR_POWER: float = _get_float("STRONG_SCRIPT_NONLINEAR_POWER", 1.6)
+SPONTANEITY_MODULATION_WEIGHT: float = _get_float("SPONTANEITY_MODULATION_WEIGHT", 0.42)
+SPONTANEITY_MODULATION_FLOOR: float = _get_float("SPONTANEITY_MODULATION_FLOOR", 0.55)
+STRONG_SCRIPT_MAX_SPONT_REDUCTION: float = _get_float("STRONG_SCRIPT_MAX_SPONT_REDUCTION", 0.28)
+MODERATE_SCRIPT_MAX_SPONT_REDUCTION: float = _get_float("MODERATE_SCRIPT_MAX_SPONT_REDUCTION", 0.42)
+WEAK_SCRIPT_MAX_SPONT_REDUCTION: float = _get_float("WEAK_SCRIPT_MAX_SPONT_REDUCTION", 0.55)
+FAKE_NATURALITY_MODULATION_PENALTY: float = _get_float("FAKE_NATURALITY_MODULATION_PENALTY", 0.35)
+STRONG_WINDOW_WEIGHT_BONUS: float = _get_float("STRONG_WINDOW_WEIGHT_BONUS", 0.55)
+PEAK_EWMA_BLEND: float = _get_float("PEAK_EWMA_BLEND", 0.72)
+P90_WINDOW_BLEND: float = _get_float("P90_WINDOW_BLEND", 0.55)
+STRONG_MEAN_BLEND: float = _get_float("STRONG_MEAN_BLEND", 0.48)
+SUSTAINED_STRONG_SCRIPT_FLOOR_RATIO: float = _get_float("SUSTAINED_STRONG_SCRIPT_FLOOR_RATIO", 0.92)
+EWMA_BENIGN_SCRIPTED_MULTIPLIER: float = _get_float("EWMA_BENIGN_SCRIPTED_MULTIPLIER", 0.88)
+EWMA_STRONG_SCRIPT_ATTACK_ALPHA: float = _get_float("EWMA_STRONG_SCRIPT_ATTACK_ALPHA", 0.88)
+HIGH_CONFIDENCE_MIN_STRONG_RATIO: float = _get_float("HIGH_CONFIDENCE_MIN_STRONG_RATIO", 0.35)
+PERSISTENCE_STRONG_RATIO_FALLBACK: float = _get_float("PERSISTENCE_STRONG_RATIO_FALLBACK", 0.55)
+
+# --- Suspicion calibration tiers (fourth-pass FP stabilization) ---
+SUSPICION_TIER_WEAK: float = _get_float("SUSPICION_TIER_WEAK", 0.15)
+SUSPICION_TIER_MODERATE: float = _get_float("SUSPICION_TIER_MODERATE", 0.25)
+SUSPICION_TIER_STRONG: float = _get_float("SUSPICION_TIER_STRONG", 0.35)
+SUSPICION_SCRIPT_BUMP_MIN: float = _get_float("SUSPICION_SCRIPT_BUMP_MIN", 0.18)
+SUSPICION_WEIGHT_WEAK: float = _get_float("SUSPICION_WEIGHT_WEAK", 0.5)
+SUSPICION_WEIGHT_MODERATE: float = _get_float("SUSPICION_WEIGHT_MODERATE", 1.0)
+SUSPICION_WEIGHT_STRONG: float = _get_float("SUSPICION_WEIGHT_STRONG", 2.0)
+SUSPICION_NONLINEAR_POWER: float = _get_float("SUSPICION_NONLINEAR_POWER", 1.35)
+SUSPICION_STRONG_SCRIPT_FACTOR: float = _get_float("SUSPICION_STRONG_SCRIPT_FACTOR", 0.35)
+SUSPICION_EVIDENCE_NORM: float = _get_float("SUSPICION_EVIDENCE_NORM", 5.0)
+EVIDENCE_COMPOSITE_SCALE: float = _get_float("EVIDENCE_COMPOSITE_SCALE", 1.15)
+COMPOSITE_EWMA_BLEND: float = _get_float("COMPOSITE_EWMA_BLEND", 0.55)
+EWMA_WEAK_INPUT_SCALE: float = _get_float("EWMA_WEAK_INPUT_SCALE", 0.35)
+EWMA_MODERATE_INPUT_SCALE: float = _get_float("EWMA_MODERATE_INPUT_SCALE", 0.65)
+EWMA_STRONG_INPUT_SCALE: float = _get_float("EWMA_STRONG_INPUT_SCALE", 1.0)
+EWMA_WEAK_DECAY_MULTIPLIER: float = _get_float("EWMA_WEAK_DECAY_MULTIPLIER", 0.72)
+WEAK_SUSPICION_NATURALITY_CAP: float = _get_float("WEAK_SUSPICION_NATURALITY_CAP", 0.62)
+WEAK_SUSPICION_NATURAL_SIM_CAP: float = _get_float("WEAK_SUSPICION_NATURAL_SIM_CAP", 0.55)
+PROBABLE_MIN_WEIGHTED_EVIDENCE: float = _get_float("PROBABLE_MIN_WEIGHTED_EVIDENCE", 2.75)
+PROBABLE_MIN_STRONG_RATIO: float = _get_float("PROBABLE_MIN_STRONG_RATIO", 0.22)
+PROBABLE_MIN_CONSECUTIVE_STRONG: int = int(_get_float("PROBABLE_MIN_CONSECUTIVE_STRONG", 2))
+PROBABLE_MIN_COMPOSITE_RATIO: float = _get_float("PROBABLE_MIN_COMPOSITE_RATIO", 0.95)
+HIGH_MIN_WEIGHTED_EVIDENCE: float = _get_float("HIGH_MIN_WEIGHTED_EVIDENCE", 5.5)
+AMBIGUOUS_MIN_WEIGHTED_EVIDENCE: float = _get_float("AMBIGUOUS_MIN_WEIGHTED_EVIDENCE", 1.2)
+
+# --- Temporal persistence (momentum + context-aware decay) ---
+MOMENTUM_LOOKBACK_WINDOWS: int = int(_get_float("MOMENTUM_LOOKBACK_WINDOWS", 6))
+MOMENTUM_DENSITY_NORM: float = _get_float("MOMENTUM_DENSITY_NORM", 0.75)
+MOMENTUM_STREAK_NORM: float = _get_float("MOMENTUM_STREAK_NORM", 4)
+MOMENTUM_HIGH_THRESHOLD: float = _get_float("MOMENTUM_HIGH_THRESHOLD", 0.55)
+MOMENTUM_MED_THRESHOLD: float = _get_float("MOMENTUM_MED_THRESHOLD", 0.32)
+EWMA_DECAY_LOW_DENSITY: float = _get_float("EWMA_DECAY_LOW_DENSITY", 0.55)
+EWMA_DECAY_MOMENTUM_HIGH: float = _get_float("EWMA_DECAY_MOMENTUM_HIGH", 0.88)
+EWMA_DECAY_MOMENTUM_MED: float = _get_float("EWMA_DECAY_MOMENTUM_MED", 0.78)
+PEAK_EWMA_MOMENTUM_BLEND: float = _get_float("PEAK_EWMA_MOMENTUM_BLEND", 0.82)
+STREAK_BOOST_PER_STRONG: float = _get_float("STREAK_BOOST_PER_STRONG", 0.018)
+STREAK_BOOST_MAX_WINDOWS: int = int(_get_float("STREAK_BOOST_MAX_WINDOWS", 5))
+STREAK_BOOST_STRONG_COUNT_BONUS: float = _get_float("STREAK_BOOST_STRONG_COUNT_BONUS", 0.04)
+PROBABLE_LIFETIME_STRONG_RATIO: float = _get_float("PROBABLE_LIFETIME_STRONG_RATIO", 0.18)
+PROBABLE_LONGEST_STREAK_MIN: int = int(_get_float("PROBABLE_LONGEST_STREAK_MIN", 2))
+PROBABLE_PEAK_EWMA_RATIO: float = _get_float("PROBABLE_PEAK_EWMA_RATIO", 0.75)
+
+# --- Answer-level behavioral synthesis (Layer 3 — final authority) ---
+DOMINANT_SCRIPT_READING_THRESHOLD: float = _get_float(
+    "DOMINANT_SCRIPT_READING_THRESHOLD", 0.52
+)
+DOMINANT_HIGH_CONFIDENCE_THRESHOLD: float = _get_float(
+    "DOMINANT_HIGH_CONFIDENCE_THRESHOLD", 0.68
+)
+DOMINANT_AMBIGUOUS_CEILING: float = _get_float("DOMINANT_AMBIGUOUS_CEILING", 0.38)
+DOMINANT_MIN_STRONG_WINDOWS: int = int(_get_float("DOMINANT_MIN_STRONG_WINDOWS", 2))
+DOMINANT_MIN_PEAK_SUSPICION: float = _get_float("DOMINANT_MIN_PEAK_SUSPICION", 0.36)
+DOMINANT_MIN_SUSPICIOUS_DENSITY: float = _get_float(
+    "DOMINANT_MIN_SUSPICIOUS_DENSITY", 0.42
+)
+DOMINANT_MAX_RECOVERY_STRENGTH: float = _get_float(
+    "DOMINANT_MAX_RECOVERY_STRENGTH", 0.48
+)
+PEAK_SUSPICION_AUTHORITY: float = _get_float("PEAK_SUSPICION_AUTHORITY", 0.40)
+STRONG_RECOVERY_THRESHOLD: float = _get_float("STRONG_RECOVERY_THRESHOLD", 0.62)
+
+# Weighted contrastive (legacy subtractive weights; v3 uses modulation in scoring_v3.py)
+CONTRASTIVE_SCRIPT_WEIGHT: float = _get_float("CONTRASTIVE_SCRIPT_WEIGHT", 0.65)
+CONTRASTIVE_NATURAL_WEIGHT: float = _get_float("CONTRASTIVE_NATURAL_WEIGHT", 0.35)
+SPONTANEITY_SUPPRESSION_SCALE: float = _get_float("SPONTANEITY_SUPPRESSION_SCALE", 0.25)
+TECHNICAL_FLUENCY_DAMPENING: float = _get_float("TECHNICAL_FLUENCY_DAMPENING", 0.15)
+
+# Naturality score shaping
+NATURALITY_SIGMOID_CENTER: float = _get_float("NATURALITY_SIGMOID_CENTER", 0.32)
+NATURALITY_SIGMOID_STEEPNESS: float = _get_float("NATURALITY_SIGMOID_STEEPNESS", 5.0)
+NATURALITY_NO_WORDS_FLOOR: float = _get_float("NATURALITY_NO_WORDS_FLOOR", 0.28)
+NATURAL_SIMILARITY_MATURITY_FLOOR: float = _get_float("NATURAL_SIMILARITY_MATURITY_FLOOR", 0.35)
+
+# Acoustic channel dampening (1.0 = unchanged; 0.75 = 25% less suspicious)
+ACOUSTIC_SENSITIVITY_SCALE: float = _get_float("ACOUSTIC_SENSITIVITY_SCALE", 0.78)
+ACOUSTIC_SHORT_ANSWER_SEC: float = _get_float("ACOUSTIC_SHORT_ANSWER_SEC", 12.0)
+ACOUSTIC_SHORT_ANSWER_EXTRA_SCALE: float = _get_float("ACOUSTIC_SHORT_ANSWER_EXTRA_SCALE", 0.9)
+
+# EWMA: stronger pull-down on benign windows
+EWMA_BENIGN_MULTIPLIER: float = _get_float("EWMA_BENIGN_MULTIPLIER", 0.6)
+EWMA_BENIGN_NATURALITY_MIN: float = _get_float("EWMA_BENIGN_NATURALITY_MIN", 0.35)
+
+# Profile health
+PROFILE_COLLAPSE_DISTANCE: float = _get_float("PROFILE_COLLAPSE_DISTANCE", 0.15)
+
+# Alert thresholds (slightly stricter)
+CONTRASTIVE_MARGIN: float = _get_float("CONTRASTIVE_MARGIN", 0.14)
+PERSISTENCE_MIN_WINDOWS: int = int(_get_float("PERSISTENCE_MIN_WINDOWS", 3))
+AMBIGUOUS_EWMA_RATIO: float = _get_float("AMBIGUOUS_EWMA_RATIO", 0.55)
+
+# --- Performance / fast calibration ---
+def _get_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Skip pyannote for calibration (single speaker reading) — saves ~30-90s
+FAST_CALIBRATION: bool = _get_bool("FAST_CALIBRATION", True)
+SKIP_DIARIZATION_CALIBRATION: bool = _get_bool("SKIP_DIARIZATION_CALIBRATION", True)
+
+# Smaller Whisper for calibration only (interview still uses WHISPER_MODEL_SIZE)
+WHISPER_CALIBRATION_MODEL_SIZE: str = _get_str("WHISPER_CALIBRATION_MODEL_SIZE", "tiny")
+# Skip wav2vec alignment during calibration (faster; word times less precise)
+WHISPER_SKIP_ALIGN_CALIBRATION: bool = _get_bool("WHISPER_SKIP_ALIGN_CALIBRATION", True)
+
+# Video timeline FPS (calibration can use lower FPS)
+VIDEO_TIMELINE_FPS: float = _get_float("VIDEO_TIMELINE_FPS", 10.0)
+VIDEO_CALIBRATION_FPS: float = _get_float("VIDEO_CALIBRATION_FPS", 5.0)
+
+# Preload Whisper when web server starts (first job avoids 30-60s model load)
+PRELOAD_MODELS_ON_STARTUP: bool = _get_bool("PRELOAD_MODELS_ON_STARTUP", True)
+
+# --- Interview speaker selection (pyannote diarization) ---
+# most_speech   — speaker with highest total talk time (legacy default)
+# least_speech  — speaker with least talk time (AI interviewer often talks less)
+# longest_turns — speaker with longer answer-sized turns (filters short AI prompts)
+_CANDIDATE_SPEAKER_RAW = _get_str("CANDIDATE_SPEAKER", "most_speech").lower()
+if _CANDIDATE_SPEAKER_RAW not in ("most_speech", "least_speech", "longest_turns"):
+    _CANDIDATE_SPEAKER_RAW = "most_speech"
+CANDIDATE_SPEAKER: str = _CANDIDATE_SPEAKER_RAW
+
+# Only used for longest_turns: ignore turns shorter than this when scoring speakers
+CANDIDATE_TURN_MIN_SEC: float = _get_float("CANDIDATE_TURN_MIN_SEC", 3.0)

@@ -1,0 +1,35 @@
+# Core
+python-dotenv==1.0.1
+numpy==1.26.4
+scipy==1.13.1
+
+# Audio processing
+opensmile==2.5.0
+praat-parselmouth==0.4.3
+pyannote.audio==3.3.2
+torchaudio==2.3.1
+
+# Speech transcription
+# IMPORTANT: install torch BEFORE whisperx to avoid dependency conflicts
+# Run these two commands manually before pip install -r requirements.txt:
+#   pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install whisperx==3.1.5
+whisperx==3.1.5
+
+# Video processing
+opencv-python==4.10.0.84
+mediapipe==0.10.14
+
+# LLM
+# (LLM judge not used in this build)
+
+# Web UI
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+httpx==0.28.1
+
+# Utilities
+ffmpeg-python==0.2.0
+librosa==0.10.2
+soundfile==0.12.1

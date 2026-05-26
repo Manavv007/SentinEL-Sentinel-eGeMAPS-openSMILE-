@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SentinEL — Script Reading Detection</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <h1>SentinEL</h1>
+      <p class="tagline">Contrastive behavioral analysis — reading vs spontaneous speech</p>
+    </div>
+    <span class="badge" id="healthBadge">checking…</span>
+  </header>
+
+  <main class="layout">
+    <section class="panel inputs">
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="calibrate">1. Calibrate</button>
+        <button type="button" class="tab" data-tab="analyze">2. Analyze</button>
+        <button type="button" class="tab" data-tab="results" id="resultsTab" disabled>3. Results</button>
+      </nav>
+
+      <div class="tab-panel active" id="panel-calibrate">
+        <h2>Calibration video</h2>
+        <p class="hint">Upload a video where the candidate <strong>reads a script</strong>. This builds the SCRIPT profile.</p>
+        <label class="file-drop">
+          <input type="file" id="calVideo" accept="video/*,audio/*" />
+          <span id="calVideoLabel">Drop calibration video or click to browse</span>
+        </label>
+        <button type="button" class="btn primary" id="btnCalibrate" disabled>Run calibration</button>
+        <div class="job-box hidden" id="calJobBox">
+          <div class="progress"><div class="progress-bar" id="calProgress"></div></div>
+          <p class="job-msg" id="calMsg"></p>
+          <p class="job-id">Job: <code id="calJobId"></code></p>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="panel-analyze">
+        <h2>Interview video</h2>
+        <p class="hint">Upload the interview recording to score against calibration.</p>
+        <label class="file-drop">
+          <input type="file" id="intVideo" accept="video/*,audio/*" />
+          <span id="intVideoLabel">Drop interview video or click to browse</span>
+        </label>
+
+        <h3>Calibration source</h3>
+        <div class="radio-group">
+          <label><input type="radio" name="calSource" value="job" checked /> Use calibration from step 1</label>
+          <label><input type="radio" name="calSource" value="file" /> Upload <code>calibration_profile.json</code></label>
+        </div>
+        <select id="calJobSelect" class="select" disabled>
+          <option value="">— complete calibration first —</option>
+        </select>
+        <label class="file-drop hidden" id="calFileWrap">
+          <input type="file" id="calJson" accept=".json,application/json" />
+          <span id="calJsonLabel">Drop calibration JSON</span>
+        </label>
+
+        <button type="button" class="btn primary" id="btnAnalyze" disabled>Run analysis</button>
+        <div class="job-box hidden" id="anJobBox">
+          <div class="progress"><div class="progress-bar" id="anProgress"></div></div>
+          <p class="job-msg" id="anMsg"></p>
+          <p class="job-id">Job: <code id="anJobId"></code></p>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="panel-results">
+        <div class="summary-row" id="summaryRow"></div>
+        <button type="button" class="btn secondary" id="btnExport">Download JSON</button>
+      </div>
+    </section>
+
+    <section class="panel viz">
+      <h2>Decision log</h2>
+      <div class="log-toolbar">
+        <input type="search" id="logFilter" placeholder="Filter log…" />
+        <select id="logPhase">
+          <option value="">All phases</option>
+          <option value="calibrate">calibrate</option>
+          <option value="analyze">analyze</option>
+          <option value="system">system</option>
+        </select>
+      </div>
+      <div class="log-stream" id="logStream"></div>
+
+      <h2 class="mt">Timeline — contrastive score</h2>
+      <div class="chart-wrap"><canvas id="timelineChart"></canvas></div>
+
+      <h2 class="mt">Per-answer channel scores</h2>
+      <div class="chart-wrap"><canvas id="answerChart"></canvas></div>
+
+      <h2 class="mt">Answers</h2>
+      <div id="answersList"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
