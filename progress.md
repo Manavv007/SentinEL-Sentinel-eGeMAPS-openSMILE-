@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-05-27  
 **Repo:** https://github.com/Manavv007/SentinEL-Sentinel-eGeMAPS-openSMILE-  
-**Latest commit:** *(this push)* — cognitive sourcing inference, analysis speed, timeline UI, profile disentanglement
+**Latest commit:** `a638bb9` — cognitive sourcing inference, analysis speed, timeline UI, profile disentanglement
 
 This file is the handoff document for any agent continuing work. Read it before changing scoring, pipeline, or Kaggle integration.
 
@@ -223,7 +223,7 @@ python scripts/test_kaggle_gpu.py
 ## 9. Git History (Recent)
 
 ```
-(latest)   Cognitive sourcing inference, speed optimizations, timeline UI, profile disentanglement
+a638bb9    Cognitive sourcing inference, speed optimizations, timeline UI, profile disentanglement
 6855a91    Update progress.md with commit 2f07d31
 2f07d31    Temporal reliability, calibration speed, local diarization fixes
 ef497a0    Kaggle segmentation + cognitive spontaneity
