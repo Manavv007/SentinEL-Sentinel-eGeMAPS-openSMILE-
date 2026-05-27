@@ -209,6 +209,52 @@ class TemporalEvidenceTracker:
                 "guided_explanation_index": float(
                     w.debug.get("guided_explanation_index", 0.0)
                 ),
+                "cognitive_wobble": float(
+                    w.debug.get("cognitive_breakdown", {}).get("cognitive_wobble", 0.0)
+                ),
+                "semantic_repair": float(
+                    w.debug.get("cognitive_breakdown", {}).get("semantic_repair", 0.0)
+                ),
+                "retrieval_friction": float(
+                    w.debug.get("cognitive_breakdown", {}).get("retrieval_friction", 0.0)
+                ),
+                "essay_like_rhythm": float(
+                    w.debug.get("cognitive_breakdown", {}).get("essay_like_rhythm", 0.0)
+                ),
+                "thematic_stability": float(
+                    w.debug.get("cognitive_breakdown", {}).get("thematic_stability", 0.0)
+                ),
+                "emotional_grounding": float(
+                    w.debug.get("cognitive_breakdown", {}).get("emotional_grounding", 0.0)
+                ),
+                "self_reference": float(
+                    w.debug.get("cognitive_breakdown", {}).get("self_reference", 0.0)
+                ),
+                "semantic_complexity": float(
+                    w.debug.get("cognitive_breakdown", {}).get("semantic_complexity", 0.0)
+                ),
+                "acoustic_turbulence": float(
+                    w.debug.get("cognitive_breakdown", {}).get("acoustic_turbulence", 0.0)
+                ),
+                "pretoken_retrieval_adaptation": float(
+                    w.debug.get("cognitive_breakdown", {}).get(
+                        "pretoken_retrieval_adaptation", 0.0
+                    )
+                ),
+                "semantic_acoustic_coherence": float(
+                    w.debug.get("cognitive_breakdown", {}).get(
+                        "semantic_acoustic_coherence", 0.0
+                    )
+                ),
+                "semantic_effort_decoupling": float(
+                    w.debug.get("cognitive_breakdown", {}).get(
+                        "semantic_effort_decoupling", 0.0
+                    )
+                ),
+                "ling_gap_variance": float(w.debug.get("pause_metrics", {}).get("gap_variance", 0.0) or 0.0),
+                "ling_retrieval_pause_max": float(
+                    w.debug.get("pause_metrics", {}).get("retrieval_pause_max", 0.0) or 0.0
+                ),
             }
             for w in self._windows
         ]
@@ -407,6 +453,14 @@ class TemporalEvidenceTracker:
             horizon=horizon,
             momentum_summary=momentum_for_synthesis,
         )
+        if config.ENABLE_COGNITIVE_SOURCING:
+            from engine.cognitive_sourcing import enrich_behavioral_with_sourcing
+
+            behavioral = enrich_behavioral_with_sourcing(
+                behavioral,
+                window_dicts,
+                temporal_layer,
+            )
         final_status, final_conf, synthesis_reasons = synthesize_final_decision(
             temporal_layer,
             behavioral,

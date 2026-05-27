@@ -121,10 +121,18 @@ def _preload_sync() -> None:
             logging.getLogger(__name__).info(
                 "Skipping local Whisper preload — Kaggle GPU offload enabled"
             )
-            return
-        from processors.transcript_processor import preload_models
+        else:
+            from processors.transcript_processor import preload_models
 
-        preload_models(calibration_only=cfg.PRELOAD_CALIBRATION_MODEL_ONLY)
+            preload_models(calibration_only=cfg.PRELOAD_CALIBRATION_MODEL_ONLY)
+
+        if cfg.PRELOAD_DIARIZATION_ON_STARTUP and not (
+            cfg.KAGGLE_OFFLOAD and cfg.KAGGLE_OFFLOAD_SEGMENTATION and cfg.KAGGLE_GPU_URL
+        ):
+            from processors.audio_processor import AudioProcessor
+
+            logging.getLogger(__name__).info("Preloading pyannote diarization pipeline...")
+            AudioProcessor.preload_heavy_models(diarization=True, opensmile=True)
     except Exception as exc:
         import logging
 

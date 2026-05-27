@@ -144,30 +144,58 @@ class BehavioralProfile:
                 profile._samples.setdefault(key, []).append(mean)
         return profile
 
-    def similarity(self, features: dict[str, float]) -> float:
+    def similarity(
+        self,
+        features: dict[str, float],
+        *,
+        metric_weights: dict[str, float] | None = None,
+    ) -> float:
         """
         Gaussian similarity of features to this profile (0-1, higher = more alike).
 
         Uses MAD-based scale per metric; unknown metrics are skipped.
+        Optional metric_weights enable profile purification / disentanglement.
         """
         stats = self.metric_stats()
         if not stats:
             return 0.0
 
-        scores: list[float] = []
+        weighted_sum = 0.0
+        weight_total = 0.0
+        unweighted: list[float] = []
+
         for key, value in features.items():
             if key not in stats or not np.isfinite(value):
                 continue
             st = stats[key]
             scale = max(st.mad, st.std, config.STD_FLOOR)
             z = abs(float(value) - st.median) / scale
-            scores.append(float(np.exp(-0.5 * z * z)))
+            score = float(np.exp(-0.5 * z * z))
 
-        if not scores:
+            if metric_weights is not None:
+                w = float(metric_weights.get(key, 0.0))
+                if w <= 0.0:
+                    continue
+                weighted_sum += w * score
+                weight_total += w
+            else:
+                unweighted.append(score)
+
+        if metric_weights is not None:
+            if weight_total <= 0.0:
+                return 0.0
+            return float(weighted_sum / weight_total)
+
+        if not unweighted:
             return 0.0
-        return float(np.mean(scores))
+        return float(np.mean(unweighted))
 
-    def similarity_mature(self, features: dict[str, float]) -> float:
+    def similarity_mature(
+        self,
+        features: dict[str, float],
+        *,
+        metric_weights: dict[str, float] | None = None,
+    ) -> float:
         """
         Similarity scaled by profile maturity (non-zero after first sample).
 
@@ -175,7 +203,7 @@ class BehavioralProfile:
         """
         if self.sample_count <= 0:
             return 0.0
-        raw = self.similarity(features)
+        raw = self.similarity(features, metric_weights=metric_weights)
         maturity = min(1.0, self.sample_count / max(config.NATURAL_PROFILE_MIN_SAMPLES, 1))
         floor = config.NATURAL_SIMILARITY_MATURITY_FLOOR
         scale = floor + (1.0 - floor) * maturity

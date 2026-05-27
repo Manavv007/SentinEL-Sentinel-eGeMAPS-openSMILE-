@@ -459,9 +459,9 @@ def run_analyze(
             },
         )
     av_msg = (
-        f"Kaggle {config.KAGGLE_SEGMENT_MODE} segment + local windows (parallel w/ video)..."
+        f"Kaggle {config.KAGGLE_SEGMENT_MODE} segment + local windows..."
         if use_kaggle_segment
-        else "Processing interview audio + video (parallel)..."
+        else "Processing interview audio..."
     )
     _emit(progress, 12, av_msg)
 
@@ -530,17 +530,14 @@ def run_analyze(
         return {"timeline_path": "", "timeline": [], "native_fps": 0.0}
 
     t_av = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        audio_future = pool.submit(_run_audio)
-        video_future = pool.submit(_run_video)
-        interview_answers = audio_future.result()
-        video_result = video_future.result()
+    interview_answers = _run_audio()
+    video_result = _run_video()
     av_sec = round(time.perf_counter() - t_av, 2)
 
     speaker_sel = audio.last_speaker_selection or {}
     log.log(
         "audio",
-        f"Interview: {len(interview_answers)} answer segment(s) ({av_sec}s, parallel w/ video)",
+        f"Interview: {len(interview_answers)} answer segment(s) ({av_sec}s)",
         phase="analyze",
         metrics={
             "answers": len(interview_answers),
@@ -554,13 +551,32 @@ def run_analyze(
     timeline: list[dict[str, Any]] = video_result.get("timeline") or []
 
     kaggle_cache: list[tuple[dict[str, Any] | None, float | None]] | None = None
-    if gpu_client.offload_active and interview_answers:
+    local_transcript_cache: list[dict[str, Any]] | None = None
+    use_kaggle_asr = gpu_client.offload_active and bool(interview_answers)
+
+    if use_kaggle_asr:
         _emit(progress, 28, "Kaggle GPU transcription (parallel)...")
         kaggle_cache = _kaggle_prefetch_answers(
             gpu_client,
             interview_answers,
             gpu_reading_profile,
             log,
+        )
+    elif interview_answers:
+        _emit(progress, 28, f"Local Whisper transcription ({config.WHISPER_MODEL_SIZE})...")
+        t_asr = time.perf_counter()
+        local_transcript_cache = transcript_proc.transcribe_answers(interview_answers)
+        asr_sec = round(time.perf_counter() - t_asr, 2)
+        log.log(
+            "asr",
+            f"Local interview transcription batch ({asr_sec}s)",
+            phase="analyze",
+            metrics={
+                "answers": len(interview_answers),
+                "elapsed_sec": asr_sec,
+                "skip_align": config.WHISPER_SKIP_ALIGN_INTERVIEW,
+                "model": config.WHISPER_MODEL_SIZE,
+            },
         )
 
     results_answers: list[dict] = []
@@ -591,12 +607,15 @@ def run_analyze(
                     end_sec=answer["end_sec"],
                 )
         else:
-            transcript = transcript_proc.transcribe_answer(
-                answer_id=answer["answer_id"],
-                audio_bytes=answer.get("audio_bytes", b""),
-                start_sec=answer["start_sec"],
-                end_sec=answer["end_sec"],
-            )
+            if local_transcript_cache is not None:
+                transcript = local_transcript_cache[idx]
+            else:
+                transcript = transcript_proc.transcribe_answer(
+                    answer_id=answer["answer_id"],
+                    audio_bytes=answer.get("audio_bytes", b""),
+                    start_sec=answer["start_sec"],
+                    end_sec=answer["end_sec"],
+                )
             gpu = _gpu_score(
                 gpu_client,
                 answer.get("audio_bytes", b""),
@@ -711,6 +730,12 @@ def run_analyze(
             }
         )
 
+    session_sourcing: dict[str, Any] = {}
+    if use_contrastive and config.ENABLE_COGNITIVE_SOURCING:
+        from engine.cognitive_sourcing import finalize_interview_sourcing
+
+        results_answers, session_sourcing = finalize_interview_sourcing(results_answers)
+
     payload: dict[str, Any] = {
         "version": 5 if use_contrastive else 4,
         "video": str(video),
@@ -726,6 +751,8 @@ def run_analyze(
         payload["window_logs"] = contrastive.export_window_logs()
         payload["profile_update_logs"] = contrastive.export_profile_update_logs()
         payload["profiles_end"] = contrastive.export_profiles()
+        if config.ENABLE_COGNITIVE_SOURCING:
+            payload["session_sourcing_inference"] = session_sourcing
 
     alerts = sum(1 for a in results_answers if a.get("status") == "PROBABLE_SCRIPT_READING")
     log.log(

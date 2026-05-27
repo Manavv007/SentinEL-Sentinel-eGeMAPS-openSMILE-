@@ -87,8 +87,12 @@
       </div>
       <div class="log-stream" id="logStream"></div>
 
-      <h2 class="mt">Timeline — contrastive score</h2>
-      <div class="chart-wrap"><canvas id="timelineChart"></canvas></div>
+      <h2 class="mt">Timeline — local signals vs answer-level reasoning</h2>
+      <p class="hint chart-legend-hint" id="timelineLegendHint">
+        Window-level lines show local acoustic evidence; shaded bands show final answer classification.
+      </p>
+      <div class="chart-wrap chart-wrap-timeline"><canvas id="timelineChart"></canvas></div>
+      <div class="timeline-tier-key" id="timelineTierKey"></div>
 
       <h2 class="mt">Per-answer channel scores</h2>
       <div class="chart-wrap"><canvas id="answerChart"></canvas></div>

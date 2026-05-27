@@ -208,6 +208,9 @@ class TranscriptProcessor:
         if calibration_fast and config.WHISPER_SKIP_ALIGN_CALIBRATION:
             return result
 
+        if not calibration_fast and config.WHISPER_SKIP_ALIGN_INTERVIEW:
+            return result
+
         align_model, metadata = load_align_model()
         result = whisperx.align(
             result["segments"],
@@ -322,6 +325,7 @@ class TranscriptProcessor:
         # Calibration uses tiny Whisper without align; avoid loading full model for filler fallback.
         if (
             not calibration_fast
+            and not config.WHISPER_DISABLE_FILLER_FALLBACK
             and duration >= 5.0
             and not (tokens & FILLER_CHECK_TOKENS)
         ):

@@ -7,8 +7,14 @@ from typing import Any
 import config
 from engine.feature_extraction import build_window_features
 from engine.naturality_scorer import NaturalityScorer
-from engine.profile_health import profile_health
+from engine.profile_disentanglement import (
+    adjust_script_similarity_for_disentanglement,
+    compute_profile_similarity_bundle,
+    filter_features_for_script_calibration,
+    natural_metric_weights,
+)
 from engine.profile_memory import BehavioralProfile
+from engine.profile_health import profile_health
 from engine.profile_purity import (
     NaturalProfileStore,
     naturality_for_profile_learning,
@@ -81,13 +87,15 @@ class ContrastiveEngine:
                 if pitch is not None:
                     prev_pitch = float(pitch)
                 rows.append(
-                    build_window_features(
-                        audio_window=w,
-                        transcript=transcript,
-                        timeline_slice=t_slice,
-                        pitch_delta=pitch_delta,
-                        answer_start_sec=a_start,
-                        answer_end_sec=a_end,
+                    filter_features_for_script_calibration(
+                        build_window_features(
+                            audio_window=w,
+                            transcript=transcript,
+                            timeline_slice=t_slice,
+                            pitch_delta=pitch_delta,
+                            answer_start_sec=a_start,
+                            answer_end_sec=a_end,
+                        )
                     )
                 )
 
@@ -119,7 +127,9 @@ class ContrastiveEngine:
         purity_state = self._natural_store.compute_purity(self.script_profile)
         conf = self._profile_confidence()
         if self.natural_profile.sample_count > 0:
-            raw = self.natural_profile.similarity_mature(features)
+            nat_keys = set(self.natural_profile.metric_stats().keys()) & set(features.keys())
+            nat_w = natural_metric_weights(nat_keys) if nat_keys else None
+            raw = self.natural_profile.similarity_mature(features, metric_weights=nat_w)
         else:
             raw = 0.0
         self._natural_store.record_raw_similarity(raw)
@@ -182,7 +192,26 @@ class ContrastiveEngine:
                 features.get("ling_technical_density", answer_tech_density)
             )
 
-            script_sim = self.script_profile.similarity(features)
+            script_bundle = compute_profile_similarity_bundle(
+                self.script_profile, features
+            )
+            script_sim_raw = float(script_bundle["similarity"])
+
+            cog_spont, cog_guided, cog_breakdown = (0.0, 0.0, {})
+            if config.ENABLE_COGNITIVE_SPONTANEITY:
+                cog_spont, cog_guided, cog_breakdown = score_cognitive_dimensions(
+                    features, answer_cognitive
+                )
+
+            script_sim, script_disentangle_meta = adjust_script_similarity_for_disentanglement(
+                script_similarity=script_sim_raw,
+                style_similarity=float(script_bundle["style_similarity"]),
+                cognitive_similarity=float(script_bundle["cognitive_similarity"]),
+                cognitive_spontaneity=cog_spont,
+                cognitive_wobble=float(features.get("cog_cognitive_wobble", 0.0)),
+                semantic_repair=float(features.get("cog_semantic_repair", 0.0)),
+            )
+
             natural_raw, natural_eff = self._natural_similarity(features, script_sim)
 
             naturality, nat_breakdown = self.naturality.score(
@@ -193,6 +222,8 @@ class ContrastiveEngine:
                 naturality,
                 nat_breakdown,
                 script_similarity=script_sim,
+                cognitive_spontaneity=cog_spont,
+                guided_explanation=cog_guided,
             )
             learn_conf = profile_learning_confidence(
                 features,
@@ -200,13 +231,11 @@ class ContrastiveEngine:
                 script_sim,
                 nat_breakdown,
                 technical_density=tech_density,
+                cognitive_spontaneity=cog_spont,
+                guided_explanation=cog_guided,
             )
             suppression, _sup_breakdown = spontaneity_suppression(features, nat_breakdown)
-            cog_spont, cog_guided, cog_breakdown = (0.0, 0.0, {})
             if config.ENABLE_COGNITIVE_SPONTANEITY:
-                cog_spont, cog_guided, cog_breakdown = score_cognitive_dimensions(
-                    features, answer_cognitive
-                )
                 suppression = min(
                     1.0,
                     suppression
@@ -227,6 +256,8 @@ class ContrastiveEngine:
                 naturality_learning=naturality_learning,
                 technical_density=tech_density,
                 learning_confidence=learn_conf,
+                cognitive_spontaneity=cog_spont,
+                guided_explanation=cog_guided,
             )
             profile_before = self.natural_profile.sample_count
             profile_updated = False
@@ -268,6 +299,10 @@ class ContrastiveEngine:
                 cognitive_spontaneity=cog_spont,
                 guided_explanation=cog_guided,
                 fluency_trap=float(features.get("cog_fluency_trap", 0.0)),
+                style_similarity=float(script_bundle["style_similarity"]),
+                cognitive_guidance_similarity=float(script_bundle["cognitive_similarity"]),
+                cognitive_wobble=float(features.get("cog_cognitive_wobble", 0.0)),
+                semantic_repair=float(features.get("cog_semantic_repair", 0.0)),
             )
 
             pending.append(
@@ -277,6 +312,11 @@ class ContrastiveEngine:
                     end_sec=end,
                     features=features,
                     script_similarity=script_sim,
+                    script_similarity_raw=script_sim_raw,
+                    style_similarity=float(script_bundle["style_similarity"]),
+                    cognitive_guidance_similarity=float(
+                        script_bundle["cognitive_similarity"]
+                    ),
                     natural_similarity_raw=natural_raw,
                     natural_similarity_effective=natural_eff,
                     naturality_score=naturality,
@@ -324,6 +364,10 @@ class ContrastiveEngine:
                     cognitive_spontaneity=row.cognitive_spontaneity,
                     guided_explanation=row.guided_explanation,
                     fluency_trap=float(row.features.get("cog_fluency_trap", 0.0)),
+                    style_similarity=row.style_similarity,
+                    cognitive_guidance_similarity=row.cognitive_guidance_similarity,
+                    cognitive_wobble=float(row.features.get("cog_cognitive_wobble", 0.0)),
+                    semantic_repair=float(row.features.get("cog_semantic_repair", 0.0)),
                 )
                 + boost,
                 horizon.answer_contrastive_floor * 0.5,
@@ -390,6 +434,11 @@ class ContrastiveEngine:
                 "cognitive_spontaneity": round(row.cognitive_spontaneity, 6),
                 "guided_explanation_index": round(row.guided_explanation, 6),
                 "cognitive_breakdown": row.cognitive_breakdown,
+                "script_similarity_raw": round(row.script_similarity_raw, 6),
+                "style_similarity": round(row.style_similarity, 6),
+                "cognitive_guidance_similarity": round(
+                    row.cognitive_guidance_similarity, 6
+                ),
             }
 
             ev = tracker.observe(

@@ -39,15 +39,27 @@ def naturality_for_profile_learning(
     nat_breakdown: dict[str, float],
     *,
     script_similarity: float,
+    cognitive_spontaneity: float = 0.0,
+    guided_explanation: float = 0.0,
 ) -> float:
     """
     Stricter than scoring naturality — requires multiple strong spontaneity cues.
+    Fluent-natural path relaxes pause-entropy requirements when cognitive evidence is strong.
     """
     if script_similarity >= config.NATURAL_UPDATE_MAX_SCRIPT_SIM:
         return 0.0
 
+    fluent_path = (
+        config.ENABLE_FLUENT_NATURAL_PROFILE_LEARNING
+        and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_MIN_SPONTANEITY
+        and guided_explanation < config.FLUENT_NATURAL_LEARNING_MAX_GUIDED
+        and script_similarity < config.FLUENT_NATURAL_UPDATE_SCRIPT_CEILING
+    )
+
     strong_cats = strong_spontaneity_categories(features, nat_breakdown)
     if strong_cats < config.NATURAL_UPDATE_MIN_STRONG_CATEGORIES:
+        if fluent_path and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_STRONG_SPONTANEITY:
+            return min(scoring_naturality * 0.82, 0.58)
         return min(scoring_naturality * 0.55, 0.45)
 
     component_floor = min(
@@ -56,17 +68,36 @@ def naturality_for_profile_learning(
         nat_breakdown.get("rate_variance", 0.0),
     )
     if component_floor < 0.4:
-        return min(scoring_naturality * 0.65, 0.5)
+        if fluent_path:
+            component_floor = max(
+                component_floor,
+                float(features.get("cog_cognitive_wobble", 0.0)) * 0.6,
+                nat_breakdown.get("self_correction", 0.0),
+            )
+        else:
+            return min(scoring_naturality * 0.65, 0.5)
 
     pause_ent = features.get("ling_pause_entropy", 0.0)
-    if pause_ent < config.NATURAL_UPDATE_MIN_PAUSE_ENTROPY:
-        return min(scoring_naturality * 0.7, 0.52)
+    min_pause = (
+        config.FLUENT_NATURAL_MIN_PAUSE_ENTROPY
+        if fluent_path
+        else config.NATURAL_UPDATE_MIN_PAUSE_ENTROPY
+    )
+    if pause_ent < min_pause:
+        if fluent_path and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_STRONG_SPONTANEITY:
+            pass
+        else:
+            return min(scoring_naturality * 0.7, 0.52)
 
     gap_var = features.get("ling_gap_variance", 0.0)
     if gap_var < 0.002 and features.get("ling_filler_clusters", 0.0) < 1.0:
-        return min(scoring_naturality * 0.75, 0.55)
+        if not fluent_path:
+            return min(scoring_naturality * 0.75, 0.55)
 
     learning = scoring_naturality * (0.55 + 0.12 * strong_cats)
+    if fluent_path:
+        learning = scoring_naturality * (0.62 + 0.10 * strong_cats)
+        learning += min(0.08, cognitive_spontaneity * 0.12)
     learning = min(1.0, learning + component_floor * 0.08)
     return float(min(1.0, max(0.0, learning)))
 
@@ -78,16 +109,30 @@ def profile_learning_confidence(
     nat_breakdown: dict[str, float],
     *,
     technical_density: float,
+    cognitive_spontaneity: float = 0.0,
+    guided_explanation: float = 0.0,
 ) -> float:
     """0–1 confidence that this window is safe to add to NATURAL profile."""
     if naturality_learning < config.NATURALITY_LEARNING_THRESHOLD:
-        return 0.0
+        fluent_relaxed = (
+            config.ENABLE_FLUENT_NATURAL_PROFILE_LEARNING
+            and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_STRONG_SPONTANEITY
+            and naturality_learning >= config.FLUENT_NATURAL_LEARNING_MIN_NATURALITY
+            and guided_explanation < config.FLUENT_NATURAL_LEARNING_MAX_GUIDED
+        )
+        if not fluent_relaxed:
+            return 0.0
 
     strong = strong_spontaneity_categories(features, nat_breakdown)
     min_strong = config.NATURAL_UPDATE_MIN_STRONG_CATEGORIES
     if technical_density >= config.NATURAL_UPDATE_MAX_TECHNICAL_DENSITY:
         min_strong += config.NATURAL_UPDATE_TECHNICAL_EXTRA_STRONG
-    if strong < min_strong:
+    fluent_path = (
+        config.ENABLE_FLUENT_NATURAL_PROFILE_LEARNING
+        and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_MIN_SPONTANEITY
+        and guided_explanation < config.FLUENT_NATURAL_LEARNING_MAX_GUIDED
+    )
+    if strong < min_strong and not fluent_path:
         return 0.0
 
     spont_signals = sum(
@@ -98,20 +143,34 @@ def profile_learning_confidence(
             "pause_entropy",
             "filler_dynamics",
             "rate_variance",
+            "retrieval_friction",
+            "semantic_drift",
+            "semantic_repair",
         )
-        if nat_breakdown.get(key, 0.0) >= 0.45
+        if nat_breakdown.get(key, 0.0) >= (0.35 if not fluent_path else 0.28)
     )
-    if spont_signals < config.NATURAL_UPDATE_MIN_SPONTANEITY_SIGNALS:
+    min_signals = (
+        config.NATURAL_UPDATE_MIN_SPONTANEITY_SIGNALS - 1
+        if fluent_path
+        else config.NATURAL_UPDATE_MIN_SPONTANEITY_SIGNALS
+    )
+    if spont_signals < min_signals and not (
+        fluent_path and cognitive_spontaneity >= config.FLUENT_NATURAL_LEARNING_STRONG_SPONTANEITY
+    ):
         return 0.0
 
     conf = 0.35
     conf += 0.25 * min(1.0, naturality_learning)
     conf += 0.15 * min(1.0, strong / max(config.NATURAL_UPDATE_MIN_STRONG_CATEGORIES, 1))
     conf += 0.1 * max(0.0, 1.0 - script_sim / max(config.NATURAL_UPDATE_MAX_SCRIPT_SIM, 1e-6))
+    if fluent_path:
+        conf += 0.08 * min(1.0, cognitive_spontaneity)
+        if float(features.get("cog_cognitive_wobble", 0.0)) >= config.COGNITIVE_TURBULENCE_WOBBLE_MIN:
+            conf += 0.05
     if technical_density >= config.NATURAL_UPDATE_MAX_TECHNICAL_DENSITY:
-        conf *= 0.35
+        conf *= 0.35 if not fluent_path else 0.62
     elif technical_density >= config.NATURAL_UPDATE_MAX_TECHNICAL_DENSITY * 0.7:
-        conf *= 0.65
+        conf *= 0.65 if not fluent_path else 0.82
 
     pause_ent = features.get("ling_pause_entropy", 0.0)
     if pause_ent >= config.NATURAL_UPDATE_MIN_PAUSE_ENTROPY:
@@ -131,6 +190,8 @@ def _diversity_key(features: dict[str, float]) -> tuple[float, ...]:
         round(features.get("ling_gap_variance", 0.0), 4),
         round(features.get("ling_filler_rate_per_30s", 0.0), 1),
         round(features.get("acoustic_pitch_range_hz", 0.0) or 0.0, 0),
+        round(features.get("cog_spontaneity_index", 0.0), 2),
+        round(features.get("ling_technical_density", 0.0), 2),
     )
 
 

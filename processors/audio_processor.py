@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -23,6 +24,11 @@ from processors.speaker_selection import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Process-wide heavy models — avoid reloading pyannote/openSMILE on every web job.
+_diarization_pipeline = None
+_opensmile_instance = None
+_model_init_lock = threading.Lock()
 
 SAMPLE_RATE = 16_000
 WINDOW_SEC = 4.0
@@ -59,9 +65,16 @@ class AudioProcessor:
 
     def __init__(self) -> None:
         self._hf_token = config.HF_TOKEN
-        self._diarization_pipeline = None
-        self._opensmile = None
         self.last_speaker_selection: dict[str, Any] | None = None
+
+    @staticmethod
+    def preload_heavy_models(*, diarization: bool = True, opensmile: bool = True) -> None:
+        """Warm pyannote/openSMILE once per worker process (web startup)."""
+        proc = AudioProcessor()
+        if opensmile:
+            proc._get_opensmile()
+        if diarization:
+            proc._get_diarization_pipeline()
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,7 +128,10 @@ class AudioProcessor:
                     "start_sec": start_sec,
                     "end_sec": end_sec,
                     "audio_bytes": self._slice_audio_bytes(waveform, start_sec, end_sec),
-                    "windows": self._extract_windows(waveform, start_sec, end_sec),
+                    "windows": self._extract_windows(
+                        waveform, start_sec, end_sec,
+                        parallel=config.AUDIO_WINDOW_PARALLEL_WORKERS > 1,
+                    ),
                 }
 
             answers: list[dict[str, Any]] = []
@@ -154,25 +170,42 @@ class AudioProcessor:
                 speech_segments = self._diarize_speech(wav_path, mode)
             answers = self._group_into_answers(speech_segments)
 
+            if mode == ProcessingMode.CALIBRATION:
+                window_workers = config.CALIBRATION_WINDOW_PARALLEL_WORKERS
+            else:
+                window_workers = config.AUDIO_WINDOW_PARALLEL_WORKERS
+
+            parallel_windows = window_workers > 1
+            parallel_answers = window_workers > 1 and len(answers) > 1
+            workers = min(window_workers, max(len(answers), 1))
+
+            def _build_answer(answer_id: int, start_sec: float, end_sec: float) -> dict[str, Any]:
+                return {
+                    "answer_id": answer_id,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "audio_bytes": self._slice_audio_bytes(waveform, start_sec, end_sec),
+                    "windows": self._extract_windows(
+                        waveform,
+                        start_sec,
+                        end_sec,
+                        parallel=parallel_windows,
+                    ),
+                }
+
             results: list[dict[str, Any]] = []
-            for answer_id, (start_sec, end_sec) in enumerate(answers):
-                audio_bytes = self._slice_audio_bytes(waveform, start_sec, end_sec)
-                parallel_windows = (
-                    mode == ProcessingMode.CALIBRATION
-                    and config.CALIBRATION_WINDOW_PARALLEL_WORKERS > 1
-                )
-                windows = self._extract_windows(
-                    waveform, start_sec, end_sec, parallel=parallel_windows
-                )
-                results.append(
-                    {
-                        "answer_id": answer_id,
-                        "start_sec": start_sec,
-                        "end_sec": end_sec,
-                        "audio_bytes": audio_bytes,
-                        "windows": windows,
-                    }
-                )
+            if parallel_answers:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    rows = list(
+                        pool.map(
+                            lambda item: _build_answer(*item),
+                            [(i, s, e) for i, (s, e) in enumerate(answers)],
+                        )
+                    )
+                results = rows
+            else:
+                for answer_id, (start_sec, end_sec) in enumerate(answers):
+                    results.append(_build_answer(answer_id, start_sec, end_sec))
             return results
         finally:
             Path(wav_path).unlink(missing_ok=True)
@@ -192,24 +225,31 @@ class AudioProcessor:
         return audio_path
 
     def _get_diarization_pipeline(self):
-        if self._diarization_pipeline is not None:
-            return self._diarization_pipeline
+        global _diarization_pipeline
+        if _diarization_pipeline is not None:
+            return _diarization_pipeline
 
-        from pyannote.audio import Pipeline
+        with _model_init_lock:
+            if _diarization_pipeline is not None:
+                return _diarization_pipeline
 
-        kwargs: dict[str, Any] = {}
-        try:
-            self._diarization_pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=self._hf_token,
-                **kwargs,
-            )
-        except TypeError:
-            self._diarization_pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=self._hf_token,
-            )
-        return self._diarization_pipeline
+            from pyannote.audio import Pipeline
+
+            kwargs: dict[str, Any] = {}
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=self._hf_token,
+                    **kwargs,
+                )
+            except TypeError:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=self._hf_token,
+                )
+            _diarization_pipeline = pipeline
+            logger.info("Loaded pyannote diarization pipeline (cached for process lifetime)")
+            return _diarization_pipeline
 
     def _diarize_speech(self, wav_path: str, mode: ProcessingMode) -> list[SpeechSegment]:
         import soundfile as sf
@@ -341,7 +381,10 @@ class AudioProcessor:
         if not parallel or len(chunks) <= 1:
             return [_one(c) for c in chunks]
 
-        workers = min(config.CALIBRATION_WINDOW_PARALLEL_WORKERS, len(chunks))
+        workers = min(
+            max(config.AUDIO_WINDOW_PARALLEL_WORKERS, config.CALIBRATION_WINDOW_PARALLEL_WORKERS),
+            len(chunks),
+        )
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(_one, chunks))
 
@@ -355,14 +398,22 @@ class AudioProcessor:
             return smile_future.result(), praat_future.result()
 
     def _get_opensmile(self):
-        if self._opensmile is None:
+        global _opensmile_instance
+        if _opensmile_instance is not None:
+            return _opensmile_instance
+
+        with _model_init_lock:
+            if _opensmile_instance is not None:
+                return _opensmile_instance
+
             import opensmile
 
-            self._opensmile = opensmile.Smile(
+            _opensmile_instance = opensmile.Smile(
                 feature_set=opensmile.FeatureSet.eGeMAPSv02,
                 feature_level=opensmile.FeatureLevel.Functionals,
             )
-        return self._opensmile
+            logger.info("Loaded openSMILE eGeMAPS (cached for process lifetime)")
+            return _opensmile_instance
 
     def _extract_opensmile(self, chunk: np.ndarray) -> dict[str, float]:
         smile = self._get_opensmile()

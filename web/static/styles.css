@@ -217,6 +217,64 @@ h3 { font-size: 0.95rem; margin: 1rem 0 0.5rem; color: var(--muted); }
   padding: 0.5rem;
 }
 
+.chart-wrap-timeline {
+  height: 280px;
+}
+
+.chart-legend-hint {
+  margin: -0.25rem 0 0.65rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.legend-chip {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.legend-chip.local {
+  background: rgba(61, 139, 253, 0.18);
+  color: #93c5fd;
+}
+
+.legend-chip.global {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fcd34d;
+}
+
+.timeline-tier-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.tier-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tier-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tier-hint {
+  color: #64748b;
+  font-size: 0.7rem;
+}
+
 .mt { margin-top: 1.5rem; }
 
 .answer-card {

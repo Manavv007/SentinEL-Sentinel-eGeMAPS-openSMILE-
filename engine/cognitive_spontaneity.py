@@ -55,6 +55,15 @@ HEDGE_RE = re.compile(
     re.I,
 )
 ABANDON_RE = re.compile(r"\b(\.{2,}|—|–|-{2,})\b")
+SELF_REF_RE = re.compile(r"\b(i|me|my|mine|myself)\b", re.I)
+EMOTIONAL_RE = re.compile(
+    r"\b(passion|love|excited|proud|enjoy|care|believe|motivated|meaningful|important to me)\b",
+    re.I,
+)
+MOTIVATION_RE = re.compile(
+    r"\b(i wanted|i chose|my goal|my journey|what drives me|for me|i decided|i learned)\b",
+    re.I,
+)
 
 
 def _words_in_range(
@@ -171,6 +180,9 @@ def _compute_cognitive_metrics(
     backtrack_count = len(BACKTRACK_RE.findall(text))
     tech_density = len(TECHNICAL_RE.findall(text)) / token_n
     hedge_count = len(HEDGE_RE.findall(text))
+    self_ref_count = len(SELF_REF_RE.findall(text))
+    emotional_count = len(EMOTIONAL_RE.findall(text))
+    motivation_count = len(MOTIVATION_RE.findall(text))
 
     # Retrieval friction: uneven pauses + hesitation before content words
     pause_before_content = tech_pauses + trans_pauses
@@ -214,6 +226,12 @@ def _compute_cognitive_metrics(
         assembly_var = min(1.0, abs(len(tokens[:mid]) - len(tokens[mid:])) / len(tokens))
     else:
         assembly_var = 0.35 if full_text else 0.2
+
+    sent_len_var = 0.0
+    sent_len_mean = 0.0
+    if len(sent_lens) >= 2:
+        sent_len_var = float(np.var(sent_lens, ddof=1))
+        sent_len_mean = float(np.mean(sent_lens))
 
       # Semantic repair (reduces suspicion when elevated)
     repair_density = repair_count / (duration / 30.0)
@@ -259,6 +277,80 @@ def _compute_cognitive_metrics(
         1.0,
         smoothness * concept_compression * (1.0 - retrieval_friction * 0.7),
     )
+    transition_hits = len(TRANSITION_RE.findall(text))
+    transition_rate = transition_hits / max(len(tokens), 1)
+    semantic_complexity = min(
+        1.0,
+        0.34 * concept_compression
+        + 0.24 * semantic_drift
+        + 0.18 * min(1.0, tech_density / 0.22)
+        + 0.14 * min(1.0, (1.0 - type_token_ratio) / 0.35)
+        + 0.10 * min(1.0, transition_rate * 12.0),
+    )
+
+    acoustic_turbulence = min(
+        1.0,
+        0.38 * retrieval_friction
+        + 0.24 * min(1.0, math.sqrt(gap_var / 0.012))
+        + 0.18 * min(1.0, friction_pause / 0.9)
+        + 0.20 * min(1.0, filler_before_tech / 2.5),
+    )
+
+    pretoken_retrieval_adaptation = 0.0
+    if pause_before_content:
+        global_pause = float(np.mean(gaps)) if gaps else 0.0
+        semantic_pause = float(np.mean(pause_before_content))
+        adaptation = max(0.0, semantic_pause - global_pause)
+        pretoken_retrieval_adaptation = min(1.0, adaptation / 0.45)
+
+    semantic_effort_gap = abs(semantic_complexity - acoustic_turbulence)
+    semantic_acoustic_coherence = min(
+        1.0,
+        max(
+            0.0,
+            0.52 * (1.0 - min(1.0, semantic_effort_gap / 0.55))
+            + 0.30 * pretoken_retrieval_adaptation
+            + 0.18 * semantic_repair,
+        ),
+    )
+    semantic_effort_decoupling = min(
+        1.0,
+        max(
+            0.0,
+            0.60 * max(0.0, semantic_complexity - acoustic_turbulence)
+            + 0.25 * max(0.0, 0.22 - pretoken_retrieval_adaptation)
+            + 0.15 * max(0.0, 0.20 - semantic_repair),
+        ),
+    )
+
+    self_ref_ratio = self_ref_count / token_n
+    emotional_grounding = min(
+        1.0,
+        0.55 * min(1.0, self_ref_ratio / 0.22)
+        + 0.30 * min(1.0, emotional_count / 2.0)
+        + 0.15 * min(1.0, motivation_count / 2.0),
+    )
+
+    sent_balanced = 0.0
+    if sent_len_mean > 1e-6 and len(sent_lens) >= 2:
+        sent_balanced = max(0.0, 1.0 - min(1.0, np.sqrt(sent_len_var) / (sent_len_mean + 1e-6)))
+    essay_like_rhythm = min(
+        1.0,
+        0.36 * smoothness
+        + 0.24 * sent_balanced
+        + 0.20 * min(1.0, transition_rate * 14.0)
+        + 0.20 * max(0.0, 1.0 - semantic_repair),
+    )
+    if emotional_grounding >= 0.35:
+        essay_like_rhythm *= 0.78
+
+    thematic_stability = min(
+        1.0,
+        0.35 * max(0.0, 1.0 - semantic_drift)
+        + 0.30 * max(0.0, 1.0 - assembly_var)
+        + 0.20 * smoothness
+        + 0.15 * max(0.0, 1.0 - retrieval_friction),
+    )
 
     return {
         "cog_retrieval_friction": round(retrieval_friction, 6),
@@ -270,6 +362,15 @@ def _compute_cognitive_metrics(
         "cog_spontaneity_index": round(spontaneity_index, 6),
         "cog_guided_explanation_index": round(guided_index, 6),
         "cog_fluency_trap": round(fluency_trap, 6),
+        "cog_self_reference": round(self_ref_ratio, 6),
+        "cog_emotional_grounding": round(emotional_grounding, 6),
+        "cog_essay_like_rhythm": round(essay_like_rhythm, 6),
+        "cog_thematic_stability": round(thematic_stability, 6),
+        "cog_semantic_complexity": round(semantic_complexity, 6),
+        "cog_acoustic_turbulence": round(acoustic_turbulence, 6),
+        "cog_pretoken_retrieval_adaptation": round(pretoken_retrieval_adaptation, 6),
+        "cog_semantic_acoustic_coherence": round(semantic_acoustic_coherence, 6),
+        "cog_semantic_effort_decoupling": round(semantic_effort_decoupling, 6),
     }
 
 
@@ -305,6 +406,21 @@ def score_cognitive_dimensions(
         "semantic_repair": float(features.get("cog_semantic_repair", 0.0)),
         "cognitive_wobble": float(features.get("cog_cognitive_wobble", 0.0)),
         "fluency_trap": float(features.get("cog_fluency_trap", 0.0)),
+        "self_reference": float(features.get("cog_self_reference", 0.0)),
+        "emotional_grounding": float(features.get("cog_emotional_grounding", 0.0)),
+        "essay_like_rhythm": float(features.get("cog_essay_like_rhythm", 0.0)),
+        "thematic_stability": float(features.get("cog_thematic_stability", 0.0)),
+        "semantic_complexity": float(features.get("cog_semantic_complexity", 0.0)),
+        "acoustic_turbulence": float(features.get("cog_acoustic_turbulence", 0.0)),
+        "pretoken_retrieval_adaptation": float(
+            features.get("cog_pretoken_retrieval_adaptation", 0.0)
+        ),
+        "semantic_acoustic_coherence": float(
+            features.get("cog_semantic_acoustic_coherence", 0.0)
+        ),
+        "semantic_effort_decoupling": float(
+            features.get("cog_semantic_effort_decoupling", 0.0)
+        ),
     }
     return round(min(1.0, spont), 6), round(min(1.0, guided), 6), breakdown
 
@@ -377,4 +493,13 @@ def _empty_profile() -> dict[str, float]:
         "cog_spontaneity_index": 0.0,
         "cog_guided_explanation_index": 0.0,
         "cog_fluency_trap": 0.0,
+        "cog_self_reference": 0.0,
+        "cog_emotional_grounding": 0.0,
+        "cog_essay_like_rhythm": 0.0,
+        "cog_thematic_stability": 0.0,
+        "cog_semantic_complexity": 0.0,
+        "cog_acoustic_turbulence": 0.0,
+        "cog_pretoken_retrieval_adaptation": 0.0,
+        "cog_semantic_acoustic_coherence": 0.0,
+        "cog_semantic_effort_decoupling": 0.0,
     }

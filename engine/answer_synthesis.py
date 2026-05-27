@@ -29,6 +29,20 @@ def compute_answer_behavioral_metrics(
     nats = [float(w.get("naturality_score", 0)) for w in windows]
     cog_spont = [float(w.get("cognitive_spontaneity", 0)) for w in windows]
     cog_guided = [float(w.get("guided_explanation_index", 0)) for w in windows]
+    wobble = [float(w.get("cognitive_wobble", 0.0)) for w in windows]
+    repair = [float(w.get("semantic_repair", 0.0)) for w in windows]
+    friction = [float(w.get("retrieval_friction", 0.0)) for w in windows]
+    gap_var = [float(w.get("ling_gap_variance", 0.0)) for w in windows]
+    retrieval_pause = [float(w.get("ling_retrieval_pause_max", 0.0)) for w in windows]
+    essay_rhythm = [float(w.get("essay_like_rhythm", 0.0)) for w in windows]
+    thematic_stability = [float(w.get("thematic_stability", 0.0)) for w in windows]
+    emotional_grounding = [float(w.get("emotional_grounding", 0.0)) for w in windows]
+    self_reference = [float(w.get("self_reference", 0.0)) for w in windows]
+    semantic_complexity = [float(w.get("semantic_complexity", 0.0)) for w in windows]
+    acoustic_turbulence = [float(w.get("acoustic_turbulence", 0.0)) for w in windows]
+    pretoken_adaptation = [float(w.get("pretoken_retrieval_adaptation", 0.0)) for w in windows]
+    semantic_acoustic_coherence = [float(w.get("semantic_acoustic_coherence", 0.0)) for w in windows]
+    semantic_effort_decoupling = [float(w.get("semantic_effort_decoupling", 0.0)) for w in windows]
 
     n = len(windows)
     strong = sum(1 for lv in levels if lv == SuspicionLevel.STRONG.value)
@@ -63,6 +77,56 @@ def compute_answer_behavioral_metrics(
         peak_ewma=float(momentum_summary.get("peak_ewma", 0) or 0),
         natural_similarity_saturation_ratio=natural_saturation,
     )
+    cognitive_fluctuation_score = _cognitive_fluctuation_score(
+        wobble=wobble,
+        repair=repair,
+        friction=friction,
+        gap_var=gap_var,
+        retrieval_pause=retrieval_pause,
+    )
+    guidance_dominance_score = _guidance_dominance_score(
+        guided=float(np.mean(cog_guided)) if cog_guided else 0.0,
+        spontaneity=float(np.mean(cog_spont)) if cog_spont else 0.0,
+        density=suspicious_density,
+        strong_ratio=strong / n,
+        drift=behavioral_drift,
+        recovery=recovery_strength,
+        fluctuation=cognitive_fluctuation_score,
+    )
+    prepared_internal_protection = _prepared_internal_speech_protection(
+        guidance_dominance_score=guidance_dominance_score,
+        cognitive_fluctuation_score=cognitive_fluctuation_score,
+        spontaneity=float(np.mean(cog_spont)) if cog_spont else 0.0,
+        guided=float(np.mean(cog_guided)) if cog_guided else 0.0,
+        recovery_strength=recovery_strength,
+        suspicious_density=suspicious_density,
+    )
+    essay_like_guidedness_score = float(np.mean(essay_rhythm)) if essay_rhythm else 0.0
+    thematic_stability_score = float(np.mean(thematic_stability)) if thematic_stability else 0.0
+    emotional_grounding_score = _emotional_grounding_score(
+        emotional=emotional_grounding,
+        self_ref=self_reference,
+        spontaneity=cog_spont,
+        repair=repair,
+    )
+    semantic_guidedness_score = _semantic_guidedness_score(
+        guided=float(np.mean(cog_guided)) if cog_guided else 0.0,
+        essay_like=essay_like_guidedness_score,
+        thematic_stability=thematic_stability_score,
+        fluctuation=cognitive_fluctuation_score,
+        emotional_grounding=emotional_grounding_score,
+        recovery=recovery_strength,
+        suspicious_density=suspicious_density,
+    )
+    semantic_complexity_score = float(np.mean(semantic_complexity)) if semantic_complexity else 0.0
+    acoustic_turbulence_score = float(np.mean(acoustic_turbulence)) if acoustic_turbulence else 0.0
+    pretoken_adaptation_score = float(np.mean(pretoken_adaptation)) if pretoken_adaptation else 0.0
+    semantic_acoustic_coherence_score = (
+        float(np.mean(semantic_acoustic_coherence)) if semantic_acoustic_coherence else 0.0
+    )
+    semantic_effort_decoupling_score = (
+        float(np.mean(semantic_effort_decoupling)) if semantic_effort_decoupling else 0.0
+    )
 
     return {
         "strong_window_count": strong,
@@ -88,6 +152,18 @@ def compute_answer_behavioral_metrics(
         "cognitive_spontaneity": round(float(np.mean(cog_spont)), 4) if cog_spont else 0.0,
         "guided_explanation_index": round(float(np.mean(cog_guided)), 4) if cog_guided else 0.0,
         "peak_cognitive_spontaneity": round(float(max(cog_spont)), 4) if cog_spont else 0.0,
+        "cognitive_fluctuation_score": round(cognitive_fluctuation_score, 4),
+        "guidance_dominance_score": round(guidance_dominance_score, 4),
+        "prepared_internal_speech_protection": bool(prepared_internal_protection),
+        "essay_like_guidedness_score": round(essay_like_guidedness_score, 4),
+        "thematic_stability_score": round(thematic_stability_score, 4),
+        "emotional_grounding_score": round(emotional_grounding_score, 4),
+        "semantic_guidedness_score": round(semantic_guidedness_score, 4),
+        "semantic_complexity_score": round(semantic_complexity_score, 4),
+        "acoustic_turbulence_score": round(acoustic_turbulence_score, 4),
+        "pretoken_retrieval_adaptation_score": round(pretoken_adaptation_score, 4),
+        "semantic_acoustic_coherence_score": round(semantic_acoustic_coherence_score, 4),
+        "semantic_effort_decoupling_score": round(semantic_effort_decoupling_score, 4),
         "weak_consistency_score": 0.0,
         "suspicious_coverage_ratio": 0.0,
         "weak_coverage_ratio": 0.0,
@@ -134,6 +210,47 @@ def synthesize_final_decision(
         temporal_summary.get("persistent_weak_authority_active", False)
     )
     mod_n = int(temporal_summary.get("moderate_window_count", 0) or 0)
+    guidance_dom = float(behavioral.get("guidance_dominance_score", 0.0) or 0.0)
+    cog_fluct = float(behavioral.get("cognitive_fluctuation_score", 0.0) or 0.0)
+    prepared_guard = bool(behavioral.get("prepared_internal_speech_protection", False))
+    semantic_guidedness = float(behavioral.get("semantic_guidedness_score", 0.0) or 0.0)
+    essay_guidedness = float(behavioral.get("essay_like_guidedness_score", 0.0) or 0.0)
+    emotional_grounding = float(behavioral.get("emotional_grounding_score", 0.0) or 0.0)
+    sem_coh = float(behavioral.get("semantic_acoustic_coherence_score", 0.0) or 0.0)
+    sem_decouple = float(behavioral.get("semantic_effort_decoupling_score", 0.0) or 0.0)
+    pretoken_quality = float(
+        behavioral.get("pretoken_retrieval_adaptation_score", 0.0) or 0.0
+    )
+    ext_source = float(behavioral.get("external_sourcing_likelihood", 0.0) or 0.0)
+    int_source = float(behavioral.get("internal_generation_likelihood", 0.0) or 0.0)
+    soft_evidence = float(behavioral.get("external_soft_evidence", 0.0) or 0.0)
+    sem_cov = float(behavioral.get("semantic_effort_covariance_score", 0.0) or 0.0)
+    seg_spont_var = float(behavioral.get("segment_spontaneity_variance", 0.0) or 0.0)
+    effort_flat = float(behavioral.get("effort_dynamics_flatness_score", 0.0) or 0.0)
+    stab_persist = float(behavioral.get("behavioral_stabilization_persistence", 0.0) or 0.0)
+    prepared_int_active = bool(
+        behavioral.get("prepared_internalization_protection_active", prepared_guard)
+    )
+    consensus_score, consensus_active_signals = _behavioral_consensus_reasoning(
+        guidance_dom=guidance_dom,
+        semantic_guidedness=semantic_guidedness,
+        persistence_signal=min(1.0, (streak / max(config.PROBABLE_LONGEST_STREAK_MIN, 1)) * 0.5),
+        suspicious_density=density,
+        weak_consistency=weak_consistency,
+        recovery=recovery,
+        cognitive_fluctuation=cog_fluct,
+        emotional_grounding=emotional_grounding,
+        natural_breathing=natural_breathing,
+        semantic_effort_decoupling=sem_decouple,
+        semantic_acoustic_coherence=sem_coh,
+    )
+    human_variability = _human_variability_prior(
+        cognitive_fluctuation=cog_fluct,
+        emotional_grounding=emotional_grounding,
+        recovery=recovery,
+        cognitive_spontaneity=cog_spont,
+        natural_breathing=natural_breathing,
+    )
 
     reasons: list[str] = []
 
@@ -183,11 +300,49 @@ def synthesize_final_decision(
         and cog_spont < config.COGNITIVE_CLEAR_GUIDED_MAX
         and density >= config.DOMINANT_MIN_SUSPICIOUS_DENSITY * 0.85
         and peak >= config.SUSPICION_TIER_MODERATE
+        and semantic_guidedness >= config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE
     )
-    if guided_scripted and promotion_gate and recovery < 0.55:
+    # --- Cognitive sourcing inference: externally guided articulation ---
+    sourcing_external_dominant = (
+        config.ENABLE_COGNITIVE_SOURCING
+        and ext_source >= config.SOURCING_EXTERNAL_PROMOTE_MIN
+        and ext_source > int_source + config.SOURCING_LIKELIHOOD_MARGIN
+        and soft_evidence >= config.SOURCING_SOFT_EVIDENCE_MIN * 0.85
+        and effort_flat >= 0.42
+        and sem_cov <= config.SOURCING_PROTECTION_WEAKEN_COV_MAX + 0.08
+        and not prepared_int_active
+    )
+    if sourcing_external_dominant and (
+        sem_decouple >= config.SEMANTIC_EFFORT_DECOUPLING_PROBABLE_MIN * 0.88
+        or stab_persist >= 0.52
+        or guidance_dom >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE * 0.92
+    ):
+        reasons.append(
+            f"cognitive sourcing: external likelihood {ext_source:.2f} vs internal {int_source:.2f} "
+            f"(covariance {sem_cov:.2f}, flat effort {effort_flat:.2f}, persistence {stab_persist:.2f})"
+        )
+        conf = "HIGH" if ext_source >= 0.62 and soft_evidence >= config.SOURCING_SOFT_EVIDENCE_MIN else "MEDIUM"
+        return "PROBABLE_SCRIPT_READING", conf, reasons
+
+    if (
+        guided_scripted
+        and promotion_gate
+        and recovery < 0.55
+        and guidance_dom >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE
+        and consensus_score >= config.GENERALIZATION_CONSENSUS_MIN_SCORE
+        and consensus_active_signals >= config.GENERALIZATION_DIVERSITY_MIN_SIGNALS
+        and sem_decouple >= config.SEMANTIC_EFFORT_DECOUPLING_PROBABLE_MIN
+    ):
         reasons.append(
             f"guided explanation flow (guided {cog_guided:.2f}, "
             f"low cognitive spontaneity {cog_spont:.2f})"
+        )
+        reasons.append(
+            f"behavioral consensus {consensus_score:.2f} from {consensus_active_signals} independent signals"
+        )
+        reasons.append(
+            f"semantic-effort decoupling {sem_decouple:.2f} "
+            f"(coherence {sem_coh:.2f}, pretoken adaptation {pretoken_quality:.2f})"
         )
         conf = "HIGH" if dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD else "MEDIUM"
         return "PROBABLE_SCRIPT_READING", conf, reasons
@@ -220,7 +375,16 @@ def synthesize_final_decision(
         return "PROBABLE_SCRIPT_READING", conf, reasons
 
     # --- Persistent weak authority (reliability over peaks; no STRONG-streak gate) ---
-    if persistent_authority and strong_n == 0 and cog_spont < 0.58 and not natural_breathing:
+    if (
+        persistent_authority
+        and strong_n == 0
+        and cog_spont < 0.58
+        and not natural_breathing
+        and guidance_dom >= config.GUIDANCE_DOMINANCE_STRICT_FOR_WEAK
+        and semantic_guidedness >= config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE
+        and consensus_score >= config.GENERALIZATION_CONSENSUS_MIN_SCORE
+        and consensus_active_signals >= config.GENERALIZATION_DIVERSITY_MIN_SIGNALS
+    ):
         reasons.append(
             f"temporal reliability: persistent weak suspiciousness "
             f"({suspicious_cov:.0%} coverage, consistency {weak_consistency:.2f}, "
@@ -229,7 +393,14 @@ def synthesize_final_decision(
         conf = "MEDIUM" if weak_consistency >= config.PERSISTENT_WEAK_CONSISTENCY_MIN + 0.1 else "LOW"
         return "PROBABLE_SCRIPT_READING", conf, reasons
 
-    if scripted_dominant or peak_authority or density_authority:
+    if (scripted_dominant or peak_authority or density_authority) and (
+        (guidance_dom >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE and semantic_guidedness >= config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE)
+        or strong_n >= 3
+    ) and (
+        consensus_score >= config.GENERALIZATION_CONSENSUS_MIN_SCORE
+        and consensus_active_signals >= config.GENERALIZATION_DIVERSITY_MIN_SIGNALS
+        and sem_decouple >= config.SEMANTIC_EFFORT_DECOUPLING_PROBABLE_MIN
+    ):
         conf = "HIGH" if (
             dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD
             and peak >= config.PEAK_SUSPICION_AUTHORITY
@@ -250,9 +421,71 @@ def synthesize_final_decision(
                 f"sustained suspicious density {density:.2f} across answer "
                 f"({streak} max STRONG streak)"
             )
+        if essay_guidedness >= config.ESSAY_LIKE_GUIDEDNESS_MIN:
+            reasons.append(
+                f"essay-like thematic continuity detected (semantic guidedness {semantic_guidedness:.2f})"
+            )
         if drift >= config.LOW_DRIFT_SUSPICION_THRESHOLD:
             reasons.append("low long-term behavioral drift (globally stable delivery)")
+        reasons.append(
+            f"behavioral consensus {consensus_score:.2f} from {consensus_active_signals} independent signals"
+        )
+        reasons.append(
+            f"semantic-effort decoupling {sem_decouple:.2f} "
+            f"(coherence {sem_coh:.2f}, pretoken adaptation {pretoken_quality:.2f})"
+        )
         return "PROBABLE_SCRIPT_READING", conf, reasons
+
+    if prepared_int_active and config.PREPARED_BEHAVIOR_SOFTEN_TO_AMBIGUOUS:
+        if temporal_status == "PROBABLE_SCRIPT_READING":
+            reasons.append(
+                f"prepared_internal_speech_protection: human turbulence present "
+                f"(fluctuation {cog_fluct:.2f}, recovery {recovery:.2f}, emotional grounding {emotional_grounding:.2f}) "
+                f"and guidance dominance {guidance_dom:.2f}"
+            )
+            return "AMBIGUOUS", "MEDIUM", reasons
+        if temporal_status == "AMBIGUOUS":
+            reasons.append(
+                "prepared_internal_speech_protection: polished but internally generated behavior likely"
+            )
+            return "AMBIGUOUS", "LOW", reasons
+
+    if (
+        config.GENERALIZATION_ENABLE_UNCERTAINTY_PRESERVE
+        and temporal_status == "PROBABLE_SCRIPT_READING"
+        and human_variability >= config.GENERALIZATION_SAFETY_MAX_HUMAN_VARIABILITY
+    ):
+        reasons.append(
+            f"generalization safety: human variability prior {human_variability:.2f} "
+            "keeps uncertainty (likely fluent/prepared natural variability)"
+        )
+        return "AMBIGUOUS", "MEDIUM", reasons
+
+    if (
+        temporal_status == "PROBABLE_SCRIPT_READING"
+        and sem_coh >= config.SEMANTIC_ACOUSTIC_COHERENCE_CLEAR_MIN
+        and pretoken_quality >= config.PRETOKEN_ADAPTATION_CLEAR_MIN
+        and sem_decouple < config.SEMANTIC_EFFORT_DECOUPLING_PROBABLE_MIN
+    ):
+        reasons.append(
+            f"semantic-acoustic coupling appears naturally plausible "
+            f"(coherence {sem_coh:.2f}, pretoken adaptation {pretoken_quality:.2f})"
+        )
+        return "AMBIGUOUS", "MEDIUM", reasons
+
+    # --- Soft ambiguous evidence (not a discard bucket) ---
+    if (
+        config.ENABLE_COGNITIVE_SOURCING
+        and soft_evidence >= config.SOURCING_SOFT_EVIDENCE_MIN
+        and ext_source > int_source
+        and temporal_status in ("CLEAR", "AMBIGUOUS")
+        and not prepared_int_active
+    ):
+        reasons.append(
+            f"cognitive sourcing soft evidence: external {ext_source:.2f} "
+            f"(covariance {sem_cov:.2f}, segment variance {seg_spont_var:.2f})"
+        )
+        return "AMBIGUOUS", "MEDIUM" if soft_evidence >= config.SOURCING_SOFT_EVIDENCE_MIN else "LOW", reasons
 
     # --- Fluent natural cognition (Answer 3 target) ---
     fluent_natural = (
@@ -264,7 +497,15 @@ def synthesize_final_decision(
         and not natural_breathing
         and consistency_auth < config.CONSISTENCY_AUTHORITY_MIN_SCORE
     )
-    if fluent_natural and dom < config.DOMINANT_SCRIPT_READING_THRESHOLD:
+    if (
+        fluent_natural
+        and dom < config.DOMINANT_SCRIPT_READING_THRESHOLD
+        and not (
+            config.ENABLE_COGNITIVE_SOURCING
+            and ext_source >= config.SOURCING_EXTERNAL_PROMOTE_MIN
+            and soft_evidence >= config.SOURCING_SOFT_EVIDENCE_MIN
+        )
+    ):
         reasons.append(
             f"fluent natural cognition (spontaneity {cog_spont:.2f}, "
             f"guided {cog_guided:.2f}) — delivery regularity not script evidence"
@@ -310,6 +551,24 @@ def synthesize_final_decision(
 
     # Fall back to temporal layer but cap: high composite + peaks → at least AMBIGUOUS
     if temporal_status == "PROBABLE_SCRIPT_READING":
+        if (
+            (guidance_dom < config.GUIDANCE_DOMINANCE_MIN_PROBABLE or semantic_guidedness < config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE)
+            and strong_n < 3
+        ):
+            reasons.append(
+                f"guidedness authority insufficient (guidance dominance {guidance_dom:.2f}, "
+                f"semantic guidedness {semantic_guidedness:.2f}) for externally guided flow"
+            )
+            return "AMBIGUOUS", "MEDIUM", reasons
+        if (
+            consensus_score < config.GENERALIZATION_CONSENSUS_MIN_SCORE
+            or consensus_active_signals < config.GENERALIZATION_DIVERSITY_MIN_SIGNALS
+        ):
+            reasons.append(
+                f"generalization-first safeguard: consensus {consensus_score:.2f}, "
+                f"signal diversity {consensus_active_signals} — insufficient multi-dimensional agreement"
+            )
+            return "AMBIGUOUS", "MEDIUM", reasons
         return temporal_status, str(temporal_summary.get("confidence", "MEDIUM")), reasons
 
     if (
@@ -424,4 +683,196 @@ def _empty_metrics() -> dict[str, Any]:
         "cognitive_spontaneity": 0.0,
         "guided_explanation_index": 0.0,
         "peak_cognitive_spontaneity": 0.0,
+        "cognitive_fluctuation_score": 0.0,
+        "guidance_dominance_score": 0.0,
+        "prepared_internal_speech_protection": False,
+        "essay_like_guidedness_score": 0.0,
+        "thematic_stability_score": 0.0,
+        "emotional_grounding_score": 0.0,
+        "semantic_guidedness_score": 0.0,
+        "semantic_complexity_score": 0.0,
+        "acoustic_turbulence_score": 0.0,
+        "pretoken_retrieval_adaptation_score": 0.0,
+        "semantic_acoustic_coherence_score": 0.0,
+        "semantic_effort_decoupling_score": 0.0,
+        "semantic_effort_covariance_score": 0.0,
+        "segment_spontaneity_variance": 0.0,
+        "chunk_transition_quality_score": 0.0,
+        "effort_dynamics_flatness_score": 0.0,
+        "behavioral_stabilization_persistence": 0.0,
+        "internal_generation_likelihood": 0.0,
+        "external_sourcing_likelihood": 0.0,
+        "external_soft_evidence": 0.0,
+        "prepared_internalization_protection_active": False,
+        "prepared_internalization_protection_weakened": False,
     }
+
+
+def _cognitive_fluctuation_score(
+    *,
+    wobble: list[float],
+    repair: list[float],
+    friction: list[float],
+    gap_var: list[float],
+    retrieval_pause: list[float],
+) -> float:
+    if not wobble:
+        return 0.0
+    wobble_m = float(np.mean(wobble))
+    repair_m = float(np.mean(repair)) if repair else 0.0
+    friction_m = float(np.mean(friction)) if friction else 0.0
+    gap_m = float(np.mean(gap_var)) if gap_var else 0.0
+    pause_m = float(np.mean(retrieval_pause)) if retrieval_pause else 0.0
+    pause_term = min(1.0, pause_m / 1.2)
+    pacing_term = min(1.0, gap_m / 0.01)
+    return float(
+        min(
+            1.0,
+            0.34 * wobble_m + 0.28 * repair_m + 0.18 * friction_m + 0.12 * pacing_term + 0.08 * pause_term,
+        )
+    )
+
+
+def _guidance_dominance_score(
+    *,
+    guided: float,
+    spontaneity: float,
+    density: float,
+    strong_ratio: float,
+    drift: float,
+    recovery: float,
+    fluctuation: float,
+) -> float:
+    return float(
+        min(
+            1.0,
+            max(
+                0.0,
+                0.34 * guided
+                + 0.20 * density
+                + 0.14 * strong_ratio
+                + 0.12 * drift
+                - 0.14 * spontaneity
+                - 0.10 * recovery
+                - 0.14 * fluctuation,
+            ),
+        )
+    )
+
+
+def _prepared_internal_speech_protection(
+    *,
+    guidance_dominance_score: float,
+    cognitive_fluctuation_score: float,
+    spontaneity: float,
+    guided: float,
+    recovery_strength: float,
+    suspicious_density: float,
+) -> bool:
+    if guidance_dominance_score >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE:
+        return False
+    if spontaneity < config.REHEARSAL_PROTECTION_MIN_SPONTANEITY:
+        return False
+    if guided > config.REHEARSAL_PROTECTION_MAX_GUIDED:
+        return False
+    if cognitive_fluctuation_score < config.REHEARSAL_PROTECTION_MIN_TURBULENCE:
+        return False
+    if recovery_strength < config.REHEARSAL_PROTECTION_MIN_RECOVERY:
+        return False
+    if guidance_dominance_score >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE * 0.95:
+        return False
+    return suspicious_density <= config.REHEARSAL_PROTECTION_MAX_STABILITY
+
+
+def _emotional_grounding_score(
+    *,
+    emotional: list[float],
+    self_ref: list[float],
+    spontaneity: list[float],
+    repair: list[float],
+) -> float:
+    emo = float(np.mean(emotional)) if emotional else 0.0
+    self_m = float(np.mean(self_ref)) if self_ref else 0.0
+    spont = float(np.mean(spontaneity)) if spontaneity else 0.0
+    rep = float(np.mean(repair)) if repair else 0.0
+    return float(min(1.0, 0.38 * emo + 0.27 * self_m + 0.20 * spont + 0.15 * rep))
+
+
+def _semantic_guidedness_score(
+    *,
+    guided: float,
+    essay_like: float,
+    thematic_stability: float,
+    fluctuation: float,
+    emotional_grounding: float,
+    recovery: float,
+    suspicious_density: float,
+) -> float:
+    return float(
+        min(
+            1.0,
+            max(
+                0.0,
+                0.34 * guided
+                + 0.24 * essay_like
+                + 0.22 * thematic_stability
+                + 0.12 * suspicious_density
+                - 0.12 * fluctuation
+                - 0.10 * emotional_grounding
+                - 0.08 * recovery,
+            ),
+        )
+    )
+
+
+def _behavioral_consensus_reasoning(
+    *,
+    guidance_dom: float,
+    semantic_guidedness: float,
+    persistence_signal: float,
+    suspicious_density: float,
+    weak_consistency: float,
+    recovery: float,
+    cognitive_fluctuation: float,
+    emotional_grounding: float,
+    natural_breathing: bool,
+    semantic_effort_decoupling: float = 0.0,
+    semantic_acoustic_coherence: float = 0.0,
+) -> tuple[float, int]:
+    """Generalization-first consensus over independent dimensions."""
+    scores = {
+        "guidedness": 0.5 * guidance_dom + 0.5 * semantic_guidedness,
+        "persistence": 0.6 * persistence_signal + 0.4 * weak_consistency,
+        "continuity": suspicious_density,
+        "low_recovery": max(0.0, 1.0 - recovery),
+        "low_fluctuation": max(0.0, 1.0 - cognitive_fluctuation),
+        "low_emotional_anchor": max(0.0, 1.0 - emotional_grounding),
+        "flow_stabilization": 0.0 if natural_breathing else min(1.0, 0.55 * guidance_dom + 0.45 * (1.0 - recovery)),
+        "cross_modal_decoupling": semantic_effort_decoupling,
+        "low_cross_modal_coherence": max(0.0, 1.0 - semantic_acoustic_coherence),
+    }
+    active = sum(1 for v in scores.values() if v >= 0.55)
+    consensus = float(np.mean(list(scores.values()))) if scores else 0.0
+    return consensus, active
+
+
+def _human_variability_prior(
+    *,
+    cognitive_fluctuation: float,
+    emotional_grounding: float,
+    recovery: float,
+    cognitive_spontaneity: float,
+    natural_breathing: bool,
+) -> float:
+    """High means behavior is plausibly explained by natural human variability."""
+    breathing = 1.0 if natural_breathing else 0.0
+    return float(
+        min(
+            1.0,
+            0.30 * cognitive_fluctuation
+            + 0.22 * emotional_grounding
+            + 0.20 * recovery
+            + 0.18 * cognitive_spontaneity
+            + 0.10 * breathing,
+        )
+    )

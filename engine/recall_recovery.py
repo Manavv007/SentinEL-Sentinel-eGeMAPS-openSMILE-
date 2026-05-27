@@ -31,6 +31,9 @@ class WindowScoreRow:
     profile_confidence: float
     natural_update_reason: str
     natural_profile_updated: bool
+    script_similarity_raw: float = 0.0
+    style_similarity: float = 0.0
+    cognitive_guidance_similarity: float = 0.0
     cognitive_spontaneity: float = 0.0
     guided_explanation: float = 0.0
     cognitive_breakdown: dict[str, float] = field(default_factory=dict)
@@ -98,6 +101,8 @@ def should_update_natural_profile(
     naturality_learning: float | None = None,
     technical_density: float = 0.0,
     learning_confidence: float = 0.0,
+    cognitive_spontaneity: float = 0.0,
+    guided_explanation: float = 0.0,
 ) -> tuple[bool, str]:
     """Strict gate: only high-confidence spontaneous cognition updates NATURAL."""
     learn_nat = (
@@ -105,6 +110,22 @@ def should_update_natural_profile(
         if naturality_learning is not None
         else naturality
     )
+
+    from engine.profile_disentanglement import fluent_natural_learning_eligible
+
+    fluent_ok, fluent_reason = fluent_natural_learning_eligible(
+        features,
+        nat_breakdown,
+        script_similarity=script_sim,
+        cognitive_spontaneity=cognitive_spontaneity,
+        guided_explanation=guided_explanation,
+        naturality_learning=learn_nat,
+    )
+    if fluent_ok:
+        if learning_confidence >= config.FLUENT_NATURAL_LEARNING_CONFIDENCE:
+            return True, fluent_reason
+        if learn_nat >= config.FLUENT_NATURAL_LEARNING_MIN_NATURALITY + 0.06:
+            return True, fluent_reason
 
     if script_sim >= config.NATURAL_UPDATE_MAX_SCRIPT_SIM:
         return False, "script_similarity_too_high"
@@ -220,6 +241,9 @@ def effective_natural_similarity(
         )
     if script_similarity >= config.STRONG_SCRIPT_THRESHOLD:
         softened *= max(0.55, 1.0 - (script_similarity - config.STRONG_SCRIPT_THRESHOLD) * 0.8)
+    elif script_similarity >= 0.58 and sample_count > 0:
+        # Mild high-script dampening before STRONG threshold (style-leak regime).
+        softened *= max(0.72, 1.0 - (script_similarity - 0.58) * 0.45)
 
     return float(max(0.0, min(dynamic_cap, softened * profile_confidence)))
 

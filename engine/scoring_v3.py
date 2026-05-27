@@ -70,6 +70,10 @@ def modulated_suspicion_score(
     cognitive_spontaneity: float = 0.0,
     guided_explanation: float = 0.0,
     fluency_trap: float = 0.0,
+    style_similarity: float = 0.0,
+    cognitive_guidance_similarity: float = 0.0,
+    cognitive_wobble: float = 0.0,
+    semantic_repair: float = 0.0,
 ) -> float:
     """
     script_emphasis * spontaneity_modulation - bounded suppression.
@@ -98,6 +102,31 @@ def modulated_suspicion_score(
             cog_spont * config.COGNITIVE_SCRIPT_DAMPEN_AT_SPONTANEITY,
         )
 
+    # Style-dominated script overlap: delivery polish without cognitive guidance.
+    style_leak = max(0.0, style_similarity - cognitive_guidance_similarity)
+    if style_leak >= config.PROFILE_STYLE_LEAK_MIN and cog_spont >= 0.35:
+        script_emph *= max(
+            0.55,
+            1.0 - min(config.FLUENT_STYLE_LEAK_DAMPEN_MAX, style_leak * 0.55),
+        )
+
+    # Cognitive turbulence (repairs, wobble) — spontaneous cognition safety.
+    turbulence = cognitive_wobble + semantic_repair * 0.85
+    if turbulence >= config.COGNITIVE_TURBULENCE_WOBBLE_MIN and cog_spont >= 0.32:
+        script_emph *= max(
+            0.58,
+            1.0 - min(config.COGNITIVE_TURBULENCE_SCRIPT_DAMPEN_MAX, turbulence * 0.35),
+        )
+
+    # Fluent natural technical explanation safety.
+    if (
+        cog_spont >= config.COGNITIVE_CLEAR_SPONTANEITY_MIN
+        and guided <= config.COGNITIVE_CLEAR_GUIDED_MAX
+        and naturality_score >= config.WEAK_SUSPICION_NATURALITY_CAP * 0.88
+        and script_similarity < config.STRONG_SCRIPT_THRESHOLD
+    ):
+        script_emph *= max(0.62, 1.0 - config.FLUENT_LINGUISTIC_DAMPEN * cog_spont)
+
     # --- Dynamic range recovery (nonlinear amplification) ---
     # When script similarity is already elevated, weak-looking contrastive values can still
     # indicate guided speech. We amplify script emphasis nonlinearly but only in the mid/high
@@ -119,6 +148,12 @@ def modulated_suspicion_score(
             (ratio - config.DOMINANCE_RATIO_MIN)
             * config.DOMINANCE_RATIO_BOOST_PER_UNIT,
         )
+    elif (
+        ratio >= config.DOMINANCE_RATIO_MIN
+        and style_leak >= config.PROFILE_STYLE_LEAK_MIN
+        and cog_spont >= config.FLUENT_NATURAL_SPONTANEITY_FLOOR
+    ):
+        dominance_boost = 0.0
 
     # --- Reduce oversuppression asymmetrically when script is high ---
     # Strong script evidence should decay slower than weak suspicion. Here we soften suppression
