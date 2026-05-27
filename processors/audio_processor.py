@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import statistics
 import tempfile
 import wave
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -17,6 +15,12 @@ import numpy as np
 import soundfile as sf
 
 import config
+from processors.speaker_selection import (
+    extract_segments_from_diarization,
+    filter_candidate_segments,
+    group_into_answers,
+    select_candidate_speaker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +157,13 @@ class AudioProcessor:
             results: list[dict[str, Any]] = []
             for answer_id, (start_sec, end_sec) in enumerate(answers):
                 audio_bytes = self._slice_audio_bytes(waveform, start_sec, end_sec)
-                windows = self._extract_windows(waveform, start_sec, end_sec)
+                parallel_windows = (
+                    mode == ProcessingMode.CALIBRATION
+                    and config.CALIBRATION_WINDOW_PARALLEL_WORKERS > 1
+                )
+                windows = self._extract_windows(
+                    waveform, start_sec, end_sec, parallel=parallel_windows
+                )
                 results.append(
                     {
                         "answer_id": answer_id,
@@ -214,20 +224,33 @@ class AudioProcessor:
 
         # Always pass in-memory audio — avoids pyannote 4.x AudioDecoder errors on Windows
         audio_input: dict[str, Any] = {"waveform": waveform, "sample_rate": int(sr)}
+        diarize_kwargs: dict[str, Any] = {}
+        if mode == ProcessingMode.INTERVIEW:
+            n_spk = int(config.DIARIZATION_NUM_SPEAKERS)
+            diarize_kwargs = {
+                "num_speakers": n_spk,
+                "min_speakers": n_spk,
+                "max_speakers": n_spk,
+            }
         try:
+            diarization_output = pipeline(audio_input, **diarize_kwargs)
+        except TypeError:
+            try:
+                diarization_output = pipeline(
+                    audio_input, num_speakers=config.DIARIZATION_NUM_SPEAKERS
+                )
+            except Exception:
+                diarization_output = pipeline(audio_input)
+        except Exception as exc:
+            # Do not fall back to file-path decoding on Windows:
+            # pyannote may try torchcodec/ffmpeg backend and fail/noise with warnings.
+            logger.warning(
+                "Diarization kwargs failed; retrying with in-memory waveform only: %s",
+                exc,
+            )
             diarization_output = pipeline(audio_input)
-        except Exception:
-            diarization_output = pipeline(wav_path)
 
-        annotation = (
-            diarization_output.speaker_diarization
-            if hasattr(diarization_output, "speaker_diarization")
-            else diarization_output
-        )
-
-        segments: list[tuple[float, float, str]] = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            segments.append((float(turn.start), float(turn.end), str(speaker)))
+        segments = extract_segments_from_diarization(diarization_output)
 
         if not segments:
             duration = self._wav_duration(wav_path)
@@ -236,7 +259,16 @@ class AudioProcessor:
         if mode == ProcessingMode.CALIBRATION:
             return [SpeechSegment(s, e) for s, e, _ in segments]
 
-        candidate, selection = _select_candidate_speaker(segments)
+        candidate, selection = select_candidate_speaker(segments)
+        candidate_turns = filter_candidate_segments(segments, candidate)
+        selection = {
+            **selection,
+            "candidate_turns_before_filter": sum(
+                1 for _, _, spk in segments if spk == candidate
+            ),
+            "candidate_turns_after_filter": len(candidate_turns),
+            "min_candidate_segment_sec": config.MIN_CANDIDATE_SEGMENT_SEC,
+        }
         self.last_speaker_selection = selection
         logger.info(
             "Interview speaker selection: strategy=%s candidate=%s debug=%s",
@@ -244,11 +276,7 @@ class AudioProcessor:
             candidate,
             selection,
         )
-        return [
-            SpeechSegment(start, end)
-            for start, end, spk in segments
-            if spk == candidate
-        ]
+        return [SpeechSegment(start, end) for start, end in candidate_turns]
 
     @staticmethod
     def _wav_duration(wav_path: str) -> float:
@@ -259,18 +287,8 @@ class AudioProcessor:
     def _group_into_answers(segments: list[SpeechSegment]) -> list[tuple[float, float]]:
         if not segments:
             return []
-
-        ordered = sorted(segments, key=lambda s: s.start_sec)
-        groups: list[list[SpeechSegment]] = [[ordered[0]]]
-
-        for seg in ordered[1:]:
-            prev_end = groups[-1][-1].end_sec
-            if seg.start_sec - prev_end > SILENCE_GAP_SEC:
-                groups.append([seg])
-            else:
-                groups[-1].append(seg)
-
-        return [(g[0].start_sec, g[-1].end_sec) for g in groups]
+        pairs = [(s.start_sec, s.end_sec) for s in sorted(segments, key=lambda x: x.start_sec)]
+        return group_into_answers(pairs, silence_gap_sec=SILENCE_GAP_SEC)
 
     @staticmethod
     def _slice_audio_bytes(
@@ -292,6 +310,8 @@ class AudioProcessor:
         waveform: np.ndarray,
         answer_start: float,
         answer_end: float,
+        *,
+        parallel: bool = False,
     ) -> list[dict[str, Any]]:
         win_samples = int(WINDOW_SEC * SAMPLE_RATE)
         hop_samples = int(HOP_SEC * SAMPLE_RATE)
@@ -302,22 +322,28 @@ class AudioProcessor:
         if answer_audio.size < win_samples // 2:
             return []
 
-        windows: list[dict[str, Any]] = []
+        chunks: list[tuple[int, np.ndarray]] = []
         offset = 0
         while offset + win_samples <= answer_audio.size:
-            chunk = answer_audio[offset : offset + win_samples]
-            window_start = answer_start + offset / SAMPLE_RATE
-            opensmile, parselmouth = self._extract_features_parallel(chunk)
-            windows.append(
-                {
-                    "window_start": round(window_start, 4),
-                    "opensmile": opensmile,
-                    "parselmouth": parselmouth,
-                }
-            )
+            chunks.append((offset, answer_audio[offset : offset + win_samples]))
             offset += hop_samples
 
-        return windows
+        def _one(item: tuple[int, np.ndarray]) -> dict[str, Any]:
+            off, chunk = item
+            window_start = answer_start + off / SAMPLE_RATE
+            opensmile, parselmouth = self._extract_features_parallel(chunk)
+            return {
+                "window_start": round(window_start, 4),
+                "opensmile": opensmile,
+                "parselmouth": parselmouth,
+            }
+
+        if not parallel or len(chunks) <= 1:
+            return [_one(c) for c in chunks]
+
+        workers = min(config.CALIBRATION_WINDOW_PARALLEL_WORKERS, len(chunks))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(_one, chunks))
 
     def _extract_features_parallel(
         self,
@@ -397,74 +423,3 @@ class AudioProcessor:
         for answer in answers:
             windows.extend(answer.get("windows", []))
         return windows
-
-
-def _speaker_total_durations(
-    segments: list[tuple[float, float, str]],
-) -> dict[str, float]:
-    durations: dict[str, float] = defaultdict(float)
-    for start, end, speaker in segments:
-        durations[speaker] += max(0.0, end - start)
-    return dict(durations)
-
-
-def _select_candidate_speaker(
-    segments: list[tuple[float, float, str]],
-) -> tuple[str, dict[str, Any]]:
-    """
-    Pick which diarization label is the human candidate (not AI interviewer).
-
-    Strategy from config.CANDIDATE_SPEAKER.
-    """
-    totals = _speaker_total_durations(segments)
-    if not totals:
-        return "SPEAKER_00", {"strategy": config.CANDIDATE_SPEAKER, "reason": "no_segments"}
-
-    strategy = config.CANDIDATE_SPEAKER
-
-    if strategy == "least_speech":
-        candidate = min(totals, key=totals.get)
-        return candidate, {
-            "strategy": strategy,
-            "speaker_total_sec": {k: round(v, 2) for k, v in totals.items()},
-            "chosen_total_sec": round(totals[candidate], 2),
-        }
-
-    if strategy == "longest_turns":
-        min_turn = config.CANDIDATE_TURN_MIN_SEC
-        turn_lengths: dict[str, list[float]] = defaultdict(list)
-        for start, end, speaker in segments:
-            dur = max(0.0, end - start)
-            if dur >= min_turn:
-                turn_lengths[speaker].append(dur)
-
-        scores: dict[str, float] = {}
-        for speaker in totals:
-            lengths = turn_lengths.get(speaker) or []
-            if not lengths:
-                # Fallback: all turns for this speaker
-                lengths = [
-                    max(0.0, end - start)
-                    for start, end, spk in segments
-                    if spk == speaker
-                ]
-            scores[speaker] = (
-                float(statistics.median(lengths)) if lengths else 0.0
-            )
-
-        candidate = max(scores, key=scores.get)
-        return candidate, {
-            "strategy": strategy,
-            "turn_min_sec": min_turn,
-            "speaker_median_turn_sec": {k: round(v, 2) for k, v in scores.items()},
-            "speaker_total_sec": {k: round(v, 2) for k, v in totals.items()},
-            "long_turn_counts": {k: len(turn_lengths.get(k, [])) for k in totals},
-        }
-
-    # most_speech (default)
-    candidate = max(totals, key=totals.get)
-    return candidate, {
-        "strategy": strategy,
-        "speaker_total_sec": {k: round(v, 2) for k, v in totals.items()},
-        "chosen_total_sec": round(totals[candidate], 2),
-    }

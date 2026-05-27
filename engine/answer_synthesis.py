@@ -8,6 +8,7 @@ import numpy as np
 
 import config
 from engine.suspicion_calibration import SuspicionLevel
+from engine.temporal_reliability import short_answer_blocks_ambiguous
 
 
 def compute_answer_behavioral_metrics(
@@ -87,6 +88,10 @@ def compute_answer_behavioral_metrics(
         "cognitive_spontaneity": round(float(np.mean(cog_spont)), 4) if cog_spont else 0.0,
         "guided_explanation_index": round(float(np.mean(cog_guided)), 4) if cog_guided else 0.0,
         "peak_cognitive_spontaneity": round(float(max(cog_spont)), 4) if cog_spont else 0.0,
+        "weak_consistency_score": 0.0,
+        "suspicious_coverage_ratio": 0.0,
+        "weak_coverage_ratio": 0.0,
+        "suspicion_variance": 0.0,
     }
 
 
@@ -115,6 +120,20 @@ def synthesize_final_decision(
     weighted = float(temporal_summary.get("weighted_evidence", 0))
     cog_spont = float(behavioral.get("cognitive_spontaneity", 0))
     cog_guided = float(behavioral.get("guided_explanation_index", 0))
+    duration_sec = float(temporal_summary.get("answer_duration_sec", 0.0) or 0.0)
+    window_count = int(temporal_summary.get("window_count", 0) or 0)
+    suspicious_cov = float(temporal_summary.get("suspicious_coverage_ratio", 0.0) or 0.0)
+    weak_cov = float(temporal_summary.get("weak_coverage_ratio", 0.0) or 0.0)
+    susp_var = float(temporal_summary.get("suspicion_variance", 0.0) or 0.0)
+    weak_consistency = float(temporal_summary.get("weak_consistency_score", 0.0) or 0.0)
+    consistency_auth = float(temporal_summary.get("consistency_authority_score", 0.0) or 0.0)
+    flat_flow = bool(temporal_summary.get("flat_suspicious_flow_active", False))
+    natural_breathing = bool(temporal_summary.get("natural_breathing_detected", False))
+    stability_score = float(temporal_summary.get("suspicious_stability_score", 0.0) or 0.0)
+    persistent_authority = bool(
+        temporal_summary.get("persistent_weak_authority_active", False)
+    )
+    mod_n = int(temporal_summary.get("moderate_window_count", 0) or 0)
 
     reasons: list[str] = []
 
@@ -173,6 +192,43 @@ def synthesize_final_decision(
         conf = "HIGH" if dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD else "MEDIUM"
         return "PROBABLE_SCRIPT_READING", conf, reasons
 
+    # --- Consistency authority: flat persistent low-variance suspicious flow (Answer 5) ---
+    if (
+        flat_flow
+        and strong_n == 0
+        and not natural_breathing
+        and not short_answer_blocks_ambiguous(
+            duration_sec=duration_sec,
+            window_count=window_count,
+            strong_count=strong_n,
+            moderate_count=mod_n,
+            composite=composite,
+            peak_suspicion=peak,
+            margin=margin,
+        )
+    ):
+        reasons.append(
+            f"consistency authority: stabilized suspicious flow "
+            f"(authority {consistency_auth:.2f}, stability {stability_score:.2f}, "
+            f"coverage {suspicious_cov:.0%}, variance {susp_var:.4f}, no natural breathing)"
+        )
+        conf = (
+            "MEDIUM"
+            if consistency_auth >= config.CONSISTENCY_AUTHORITY_MIN_SCORE + 0.10
+            else "LOW"
+        )
+        return "PROBABLE_SCRIPT_READING", conf, reasons
+
+    # --- Persistent weak authority (reliability over peaks; no STRONG-streak gate) ---
+    if persistent_authority and strong_n == 0 and cog_spont < 0.58 and not natural_breathing:
+        reasons.append(
+            f"temporal reliability: persistent weak suspiciousness "
+            f"({suspicious_cov:.0%} coverage, consistency {weak_consistency:.2f}, "
+            f"variance {susp_var:.4f}, recovery {recovery:.2f})"
+        )
+        conf = "MEDIUM" if weak_consistency >= config.PERSISTENT_WEAK_CONSISTENCY_MIN + 0.1 else "LOW"
+        return "PROBABLE_SCRIPT_READING", conf, reasons
+
     if scripted_dominant or peak_authority or density_authority:
         conf = "HIGH" if (
             dom >= config.DOMINANT_HIGH_CONFIDENCE_THRESHOLD
@@ -204,6 +260,9 @@ def synthesize_final_decision(
         and cog_guided <= config.COGNITIVE_CLEAR_GUIDED_MAX
         and strong_n == 0
         and peak < config.SUSPICION_TIER_STRONG
+        and not flat_flow
+        and not natural_breathing
+        and consistency_auth < config.CONSISTENCY_AUTHORITY_MIN_SCORE
     )
     if fluent_natural and dom < config.DOMINANT_SCRIPT_READING_THRESHOLD:
         reasons.append(
@@ -219,6 +278,20 @@ def synthesize_final_decision(
     ) and peak < config.DOMINANT_MIN_PEAK_SUSPICION
 
     if weak_dominant and dom < config.DOMINANT_AMBIGUOUS_CEILING:
+        if short_answer_blocks_ambiguous(
+            duration_sec=duration_sec,
+            window_count=window_count,
+            strong_count=strong_n,
+            moderate_count=mod_n,
+            composite=composite,
+            peak_suspicion=peak,
+            margin=margin,
+        ):
+            reasons.append(
+                f"short answer reliability guard ({duration_sec:.0f}s, {window_count} windows, "
+                f"{mod_n} moderate) — insufficient sustained evidence"
+            )
+            return "CLEAR", "LOW", reasons
         if composite >= margin * config.AMBIGUOUS_EWMA_RATIO or weighted >= config.AMBIGUOUS_MIN_WEIGHTED_EVIDENCE:
             reasons.append(
                 "only weak/moderate suspicion tiers — no dominant scripted signature"

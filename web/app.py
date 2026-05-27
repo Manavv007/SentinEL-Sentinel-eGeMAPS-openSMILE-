@@ -124,7 +124,7 @@ def _preload_sync() -> None:
             return
         from processors.transcript_processor import preload_models
 
-        preload_models()
+        preload_models(calibration_only=cfg.PRELOAD_CALIBRATION_MODEL_ONLY)
     except Exception as exc:
         import logging
 

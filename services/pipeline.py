@@ -14,9 +14,7 @@ import config
 from engine.analysis_engine import AnalysisEngine
 from engine.contrastive_engine import ContrastiveEngine
 from engine.fused_scorer import FusedScorer
-from engine.gaze_analyzer import GazeAnalyzer
 from engine.linguistic_analyzer import LinguisticAnalyzer
-from engine.lip_analyzer import LipAnalyzer
 from engine.profile_memory import BehavioralProfile
 from gpu_client import KaggleGPUClient
 from processors.audio_processor import AudioProcessor
@@ -26,7 +24,6 @@ from processors.transcript_processor import (
     load_whisper_model,
     preload_models,
 )
-from processors.video_processor import VideoProcessor
 from scoring.baseline import load_baseline_profile, save_baseline_profile
 
 ProgressCallback = Callable[[int, str, dict[str, Any] | None], None]
@@ -118,7 +115,7 @@ def _startup_models(
             ),
             phase="system",
         )
-        load_whisper_calibration_model()
+        load_whisper_calibration_model(skip_filler_check=True)
     else:
         log.log(
             "startup",
@@ -204,10 +201,7 @@ def run_calibrate(
     _emit(progress, 5, "Models loaded", None)
 
     audio = AudioProcessor()
-    video_proc = VideoProcessor()
     engine = AnalysisEngine()
-    gaze_analyzer = GazeAnalyzer()
-    lip_analyzer = LipAnalyzer()
     transcript_proc = TranscriptProcessor()
     linguistic_analyzer = LinguisticAnalyzer()
 
@@ -225,30 +219,30 @@ def run_calibrate(
         return audio.process_calibration(str(video))
 
     def _run_video() -> dict[str, Any]:
-        return video_proc.process_video(str(video), timeline_fps=video_fps)
+        # Video gaze/lip scanning removed (performance + robustness).
+        return {"timeline_path": "", "timeline": [], "native_fps": 0.0}
 
     t_audio = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        audio_future = pool.submit(_run_audio)
-        video_future = pool.submit(_run_video)
-        answers = audio_future.result()
-        video_result = video_future.result()
+    answers = _run_audio()
+    video_result = _run_video()
     audio_sec = round(time.perf_counter() - t_audio, 2)
 
     log.log(
         "audio",
-        f"Calibration audio: {len(answers)} answer segment(s) ({audio_sec}s, parallel w/ video)",
+        f"Calibration audio: {len(answers)} answer segment(s) ({audio_sec}s)",
         phase="calibrate",
         metrics={
             "answers": len(answers),
             "fast_mode": fast,
             "skip_diarization": config.SKIP_DIARIZATION_CALIBRATION,
+            "window_parallel_workers": config.CALIBRATION_WINDOW_PARALLEL_WORKERS,
             "elapsed_sec": audio_sec,
         },
     )
     gpu_reading_profile: dict | None = None
-    if gpu_client.enabled:
+    if gpu_client.enabled and config.KAGGLE_OFFLOAD_CALIBRATION:
         _emit(progress, 12, "GPU calibration (Kaggle)...", None)
+        t_gpu = time.perf_counter()
         best = max(
             answers,
             key=lambda a: len(a.get("audio_bytes") or b""),
@@ -256,30 +250,40 @@ def run_calibrate(
         )
         if best and best.get("audio_bytes"):
             gpu_reading_profile = gpu_client.calibrate(best["audio_bytes"])
+        gpu_sec = round(time.perf_counter() - t_gpu, 2)
         if gpu_reading_profile:
             log.log(
                 "gpu_calibrate",
-                "GPU reading profile from Kaggle /calibrate",
+                f"GPU reading profile from Kaggle /calibrate ({gpu_sec}s)",
                 phase="calibrate",
                 metrics={"has_parselmouth": "parselmouth_baseline" in gpu_reading_profile},
             )
         else:
             log.log(
                 "gpu_calibrate",
-                "Kaggle GPU calibrate returned no profile (check KAGGLE_GPU_URL / notebook)",
+                "Kaggle GPU calibrate skipped or failed (local profile still valid)",
                 phase="calibrate",
                 level="warning",
+                metrics={"elapsed_sec": gpu_sec},
             )
+    elif gpu_client.enabled:
+        log.log(
+            "gpu_calibrate",
+            "Kaggle /calibrate skipped (KAGGLE_OFFLOAD_CALIBRATION=false) — local CPU profile only",
+            phase="calibrate",
+        )
 
     windows = AudioProcessor.collect_windows(answers)
+    t_acoustic = time.perf_counter()
     reading_profile = engine.calibrate(windows)
+    acoustic_sec = round(time.perf_counter() - t_acoustic, 2)
     log.log(
         "acoustic_profile",
         "Built acoustic reading profile from openSMILE windows",
         phase="calibrate",
-        metrics={"windows": len(windows), "profile_keys": len(reading_profile)},
+        metrics={"windows": len(windows), "profile_keys": len(reading_profile), "elapsed_sec": acoustic_sec},
     )
-    _emit(progress, 35, f"Acoustic profile from {len(windows)} windows", None)
+    _emit(progress, 35, f"Acoustic profile from {len(windows)} windows ({acoustic_sec}s)", None)
 
     _emit(
         progress,
@@ -289,6 +293,12 @@ def run_calibrate(
     t_asr = time.perf_counter()
     cal_transcripts = transcript_proc.transcribe_answers(answers, calibration_fast=fast)
     asr_sec = round(time.perf_counter() - t_asr, 2)
+    log.log(
+        "asr",
+        f"Calibration transcription ({asr_sec}s)",
+        phase="calibrate",
+        metrics={"backend": config.WHISPER_CALIBRATION_MODEL_SIZE if fast else config.WHISPER_MODEL_SIZE},
+    )
     linguistic_calibration = linguistic_analyzer.calibrate(cal_transcripts)
     log.log(
         "linguistic",
@@ -302,14 +312,12 @@ def run_calibrate(
     )
     _emit(progress, 65, f"Transcription complete ({asr_sec}s)", None)
 
-    timeline = video_result["timeline"]
-    gaze_calibration = gaze_analyzer.calibrate(timeline)
-    lip_calibration = lip_analyzer.calibrate(timeline)
+    timeline: list[dict[str, Any]] = video_result.get("timeline") or []
     log.log(
         "video",
-        f"Video timeline: {len(timeline)} frames @ {video_fps} fps",
+        "Video scanning disabled (no gaze/lip timeline)",
         phase="calibrate",
-        metrics={"frames": len(timeline), "timeline_fps": video_fps},
+        metrics={"frames": 0, "timeline_fps": 0},
     )
     _emit(progress, 85, "Building SCRIPT behavioral profile...")
 
@@ -330,16 +338,16 @@ def run_calibrate(
     profile = {
         "version": 5,
         "source_video": str(video),
-        "timeline_path": video_result["timeline_path"],
+        "timeline_path": video_result.get("timeline_path", ""),
         "acoustic_reading_profile": reading_profile,
         "gpu_reading_profile": gpu_reading_profile,
         "script_profile": script_profile.to_dict(),
         "linguistic_calibration": linguistic_calibration,
-        "gaze_calibration": gaze_calibration,
-        "lip_calibration": lip_calibration,
+        "gaze_calibration": {},
+        "lip_calibration": {},
         "calibration_answers": len(answers),
         "calibration_windows": len(windows),
-        "timeline_frames": len(timeline),
+        "timeline_frames": 0,
         "contrastive_engine": True,
     }
     save_baseline_profile(profile, out_path)
@@ -351,7 +359,6 @@ def run_calibrate(
         phase="calibrate",
         metrics={"elapsed_sec": elapsed, "output": str(out_path)},
     )
-    video_proc.close()
     _emit(progress, 100, "Calibration complete", None)
 
     return {
@@ -395,19 +402,14 @@ def run_analyze(
         raise ValueError("Calibration profile missing acoustic_reading_profile")
     gpu_reading_profile = profile.get("gpu_reading_profile")
 
-    gaze_calibration = profile.get("gaze_calibration", {})
-    lip_calibration = profile.get("lip_calibration", {})
     linguistic_calibration = profile.get("linguistic_calibration", {})
 
     gpu_client = _startup_models(log)
     _emit(progress, 5, "Models loaded", None)
 
     audio = AudioProcessor()
-    video_proc = VideoProcessor()
     transcript_proc = TranscriptProcessor()
     engine = AnalysisEngine()
-    gaze_analyzer = GazeAnalyzer()
-    lip_analyzer = LipAnalyzer()
     linguistic_analyzer = LinguisticAnalyzer()
     scorer = FusedScorer()
     scorer.reset_ewma()
@@ -465,6 +467,16 @@ def run_analyze(
 
     def _run_audio() -> list[dict[str, Any]]:
         if not use_kaggle_segment:
+            log.log(
+                "audio",
+                "Local pyannote diarization (recommended for AI vs candidate accuracy)",
+                phase="analyze",
+                metrics={
+                    "candidate_speaker": config.CANDIDATE_SPEAKER,
+                    "num_speakers": config.DIARIZATION_NUM_SPEAKERS,
+                    "min_candidate_segment_sec": config.MIN_CANDIDATE_SEGMENT_SEC,
+                },
+            )
             return audio.process_interview(str(video))
 
         wav_path = audio.extract_audio(str(video))
@@ -514,9 +526,8 @@ def run_analyze(
             Path(wav_path).unlink(missing_ok=True)
 
     def _run_video() -> dict[str, Any]:
-        return video_proc.process_video(
-            str(video), timeline_fps=config.VIDEO_INTERVIEW_FPS
-        )
+        # Video gaze/lip scanning removed (performance + robustness).
+        return {"timeline_path": "", "timeline": [], "native_fps": 0.0}
 
     t_av = time.perf_counter()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -540,7 +551,7 @@ def run_analyze(
         decision=f"candidate_track={speaker_sel.get('strategy', config.CANDIDATE_SPEAKER)}",
     )
 
-    timeline = video_result["timeline"]
+    timeline: list[dict[str, Any]] = video_result.get("timeline") or []
 
     kaggle_cache: list[tuple[dict[str, Any] | None, float | None]] | None = None
     if gpu_client.offload_active and interview_answers:
@@ -598,11 +609,9 @@ def run_analyze(
             duration_sec=duration,
             technical_density=tech_density,
         )
-        t_window = VideoProcessor.slice_timeline(
-            timeline, answer["start_sec"], answer["end_sec"]
-        )
-        gaze_score, gaze_breakdown = gaze_analyzer.analyze(t_window, gaze_calibration)
-        lip_score, lip_breakdown = lip_analyzer.analyze(t_window, lip_calibration)
+        t_window: list[dict[str, Any]] = []
+        gaze_score, gaze_breakdown = None, {}
+        lip_score, lip_breakdown = None, {}
 
         ling_score, ling_breakdown = linguistic_analyzer.analyze(
             transcript, linguistic_calibration
@@ -673,8 +682,8 @@ def run_analyze(
                 "end_sec": answer["end_sec"],
                 "acoustic": ac_score,
                 "linguistic": ling_score,
-                "gaze": gaze_score,
-                "lip": lip_score,
+                "gaze": None,
+                "lip": None,
                 "fused_raw": fused.get("raw_score"),
                 "fused_ewma": fused.get("smoothed_score"),
                 "confidence": fused.get("confidence"),
@@ -698,7 +707,7 @@ def run_analyze(
                 "transcript": transcript.get("transcript", ""),
                 "transcription_backend": transcript.get("transcription_backend", ""),
                 "num_windows": len(answer.get("windows", [])),
-                "timeline_frames": len(t_window),
+                "timeline_frames": 0,
             }
         )
 
@@ -706,7 +715,7 @@ def run_analyze(
         "version": 5 if use_contrastive else 4,
         "video": str(video),
         "calibration": cal_label,
-        "timeline_path": video_result["timeline_path"],
+        "timeline_path": video_result.get("timeline_path", ""),
         "contrastive_engine": use_contrastive,
         "candidate_speaker_strategy": config.CANDIDATE_SPEAKER,
         "speaker_selection": speaker_sel,
@@ -735,7 +744,6 @@ def run_analyze(
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         payload["results_path"] = str(out_path)
 
-    video_proc.close()
     _emit(progress, 100, "Analysis complete", None)
 
     payload["elapsed_sec"] = round(time.perf_counter() - t0, 2)

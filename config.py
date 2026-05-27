@@ -301,6 +301,72 @@ ACOUSTIC_SENSITIVITY_SCALE: float = _get_float("ACOUSTIC_SENSITIVITY_SCALE", 0.7
 ACOUSTIC_SHORT_ANSWER_SEC: float = _get_float("ACOUSTIC_SHORT_ANSWER_SEC", 12.0)
 ACOUSTIC_SHORT_ANSWER_EXTRA_SCALE: float = _get_float("ACOUSTIC_SHORT_ANSWER_EXTRA_SCALE", 0.9)
 
+# --- Duration-aware temporal evidence normalization (answer-level) ---
+# Short answers have fewer windows and higher variance; require stronger evidence.
+TEMPORAL_SHORT_ANSWER_SEC: float = _get_float("TEMPORAL_SHORT_ANSWER_SEC", 12.0)
+TEMPORAL_SHORT_MIN_WINDOWS: int = int(_get_float("TEMPORAL_SHORT_MIN_WINDOWS", 4))
+TEMPORAL_SHORT_SUPPRESSION_MAX: float = _get_float(
+    "TEMPORAL_SHORT_SUPPRESSION_MAX", 0.35
+)
+
+# Persistent-weak suspicion promotion (clever scripted delivery)
+PERSISTENT_WEAK_MIN_DURATION_SEC: float = _get_float(
+    "PERSISTENT_WEAK_MIN_DURATION_SEC", 18.0
+)
+PERSISTENT_WEAK_COVERAGE_MIN: float = _get_float("PERSISTENT_WEAK_COVERAGE_MIN", 0.55)
+PERSISTENT_SUSPICIOUS_COVERAGE_MIN: float = _get_float(
+    "PERSISTENT_SUSPICIOUS_COVERAGE_MIN", 0.68
+)
+PERSISTENT_WEAK_VARIANCE_MAX: float = _get_float("PERSISTENT_WEAK_VARIANCE_MAX", 0.012)
+PERSISTENT_WEAK_RECOVERY_MAX: float = _get_float("PERSISTENT_WEAK_RECOVERY_MAX", 0.45)
+PERSISTENT_WEAK_AVG_SCRIPT_MIN: float = _get_float("PERSISTENT_WEAK_AVG_SCRIPT_MIN", 0.60)
+PERSISTENT_WEAK_BOOST_MAX: float = _get_float("PERSISTENT_WEAK_BOOST_MAX", 0.10)
+PERSISTENT_WEAK_COMPOSITE_BONUS_MAX: float = _get_float(
+    "PERSISTENT_WEAK_COMPOSITE_BONUS_MAX", 0.18
+)
+PERSISTENT_WEAK_CONSISTENCY_MIN: float = _get_float("PERSISTENT_WEAK_CONSISTENCY_MIN", 0.58)
+PERSISTENT_WEAK_MIN_WINDOWS: int = int(_get_float("PERSISTENT_WEAK_MIN_WINDOWS", 4))
+PERSISTENT_WEAK_MIN_STREAK: int = int(_get_float("PERSISTENT_WEAK_MIN_STREAK", 3))
+PERSISTENT_WEAK_MEAN_FLOOR: float = _get_float("PERSISTENT_WEAK_MEAN_FLOOR", 0.16)
+PERSISTENT_WEAK_MEAN_SPAN: float = _get_float("PERSISTENT_WEAK_MEAN_SPAN", 0.08)
+PERSISTENT_WEAK_STABILITY_STD_NORM: float = _get_float(
+    "PERSISTENT_WEAK_STABILITY_STD_NORM", 0.06
+)
+PERSISTENT_WEAK_RELIABILITY_EVIDENCE_SCALE: float = _get_float(
+    "PERSISTENT_WEAK_RELIABILITY_EVIDENCE_SCALE", 2.8
+)
+PERSISTENT_WEAK_AUTHORITY_COMPOSITE_FLOOR: float = _get_float(
+    "PERSISTENT_WEAK_AUTHORITY_COMPOSITE_FLOOR", 0.155
+)
+SHORT_ANSWER_AMBIGUOUS_MIN_MODERATE_WINDOWS: int = int(
+    _get_float("SHORT_ANSWER_AMBIGUOUS_MIN_MODERATE_WINDOWS", 3)
+)
+SHORT_ANSWER_AMBIGUOUS_COMPOSITE_RATIO: float = _get_float(
+    "SHORT_ANSWER_AMBIGUOUS_COMPOSITE_RATIO", 1.05
+)
+SHORT_ANSWER_AMBIGUOUS_MIN_PEAK: float = _get_float(
+    "SHORT_ANSWER_AMBIGUOUS_MIN_PEAK", 0.30
+)
+
+# Consistency authority — flat low-variance suspicious flow (Answer 5 / adaptive fake spontaneity)
+CONSISTENCY_MIN_DURATION_SEC: float = _get_float("CONSISTENCY_MIN_DURATION_SEC", 18.0)
+CONSISTENCY_AUTHORITY_MIN_SCORE: float = _get_float("CONSISTENCY_AUTHORITY_MIN_SCORE", 0.58)
+CONSISTENCY_MIN_ELEVATED_RATIO: float = _get_float("CONSISTENCY_MIN_ELEVATED_RATIO", 0.68)
+CONSISTENCY_FLAT_STD_MAX: float = _get_float("CONSISTENCY_FLAT_STD_MAX", 0.028)
+CONSISTENCY_MAX_RECOVERY_STRENGTH: float = _get_float("CONSISTENCY_MAX_RECOVERY_STRENGTH", 0.38)
+CONSISTENCY_MAX_RECOVERY_FREQUENCY: float = _get_float("CONSISTENCY_MAX_RECOVERY_FREQUENCY", 0.18)
+CONSISTENCY_AUTHORITY_COMPOSITE_BOOST: float = _get_float(
+    "CONSISTENCY_AUTHORITY_COMPOSITE_BOOST", 0.14
+)
+CONSISTENCY_AUTHORITY_EVIDENCE_BOOST: float = _get_float(
+    "CONSISTENCY_AUTHORITY_EVIDENCE_BOOST", 1.6
+)
+CONSISTENCY_BREATHING_DIP_THRESHOLD: float = _get_float(
+    "CONSISTENCY_BREATHING_DIP_THRESHOLD", 0.11
+)
+CONSISTENCY_BREATHING_RANGE_MIN: float = _get_float("CONSISTENCY_BREATHING_RANGE_MIN", 0.08)
+CONSISTENCY_BREATHING_MIN_SCORE: float = _get_float("CONSISTENCY_BREATHING_MIN_SCORE", 0.22)
+
 # EWMA: stronger pull-down on benign windows
 EWMA_BENIGN_MULTIPLIER: float = _get_float("EWMA_BENIGN_MULTIPLIER", 0.6)
 EWMA_BENIGN_NATURALITY_MIN: float = _get_float("EWMA_BENIGN_NATURALITY_MIN", 0.35)
@@ -362,16 +428,25 @@ VIDEO_CALIBRATION_FPS: float = _get_float("VIDEO_CALIBRATION_FPS", 5.0)
 
 # Preload Whisper when web server starts (first job avoids 30-60s model load)
 PRELOAD_MODELS_ON_STARTUP: bool = _get_bool("PRELOAD_MODELS_ON_STARTUP", True)
+# When true, startup only loads the small calibration Whisper (interview model loads on first analyze)
+PRELOAD_CALIBRATION_MODEL_ONLY: bool = _get_bool("PRELOAD_CALIBRATION_MODEL_ONLY", True)
+# Optional Kaggle /calibrate (duplicates local work; large-v3+align on GPU). Off by default for speed.
+KAGGLE_OFFLOAD_CALIBRATION: bool = _get_bool("KAGGLE_OFFLOAD_CALIBRATION", False)
+KAGGLE_CALIBRATE_CONNECT_TIMEOUT_SEC: float = _get_float(
+    "KAGGLE_CALIBRATE_CONNECT_TIMEOUT_SEC", 8.0
+)
+CALIBRATION_WINDOW_PARALLEL_WORKERS: int = max(
+    1, int(_get_float("CALIBRATION_WINDOW_PARALLEL_WORKERS", 4))
+)
 
 # Kaggle GPU offload — skip slow local Whisper when notebook is configured
-KAGGLE_CALIBRATE_TIMEOUT_SEC: int = int(_get_float("KAGGLE_CALIBRATE_TIMEOUT_SEC", 600))
+KAGGLE_CALIBRATE_TIMEOUT_SEC: int = int(_get_float("KAGGLE_CALIBRATE_TIMEOUT_SEC", 90))
 KAGGLE_OFFLOAD: bool = _get_bool("KAGGLE_OFFLOAD", bool(KAGGLE_GPU_URL))
 KAGGLE_OFFLOAD_TRANSCRIPTION: bool = _get_bool("KAGGLE_OFFLOAD_TRANSCRIPTION", True)
 KAGGLE_PARALLEL_ANSWERS: int = max(1, int(_get_float("KAGGLE_PARALLEL_ANSWERS", 4)))
 SKIP_LOCAL_WHISPER_WHEN_KAGGLE: bool = _get_bool("SKIP_LOCAL_WHISPER_WHEN_KAGGLE", True)
-KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool(
-    "KAGGLE_OFFLOAD_SEGMENTATION", bool(KAGGLE_GPU_URL)
-)
+# Local pyannote diarization is more reliable for AI vs candidate — default off.
+KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool("KAGGLE_OFFLOAD_SEGMENTATION", False)
 KAGGLE_SEGMENT_TIMEOUT_SEC: int = int(_get_float("KAGGLE_SEGMENT_TIMEOUT_SEC", 900))
 # fast = Silero VAD + long-turn filter (~10–30s); pyannote = accurate but slow (minutes)
 KAGGLE_SEGMENT_MODE: str = _get_str("KAGGLE_SEGMENT_MODE", "pyannote").lower()
@@ -385,13 +460,18 @@ AUDIO_WINDOW_PARALLEL_WORKERS: int = max(
 )
 
 # --- Interview speaker selection (pyannote diarization) ---
-# most_speech   — speaker with highest total talk time (legacy default)
-# least_speech  — speaker with least talk time (AI interviewer often talks less)
-# longest_turns — speaker with longer answer-sized turns (filters short AI prompts)
-_CANDIDATE_SPEAKER_RAW = _get_str("CANDIDATE_SPEAKER", "most_speech").lower()
-if _CANDIDATE_SPEAKER_RAW not in ("most_speech", "least_speech", "longest_turns"):
-    _CANDIDATE_SPEAKER_RAW = "most_speech"
+# most_speech   — speaker with highest total talk time (legacy; pre-Kaggle default)
+# least_speech  — speaker with least talk time (AI interviewer talks more)
+# longest_turns — longer median turns (can mis-pick if candidate gives short answers)
+# auto          — vote + composite (recommended)
+_CANDIDATE_SPEAKER_RAW = _get_str("CANDIDATE_SPEAKER", "auto").lower()
+if _CANDIDATE_SPEAKER_RAW not in ("most_speech", "least_speech", "longest_turns", "auto"):
+    _CANDIDATE_SPEAKER_RAW = "auto"
 CANDIDATE_SPEAKER: str = _CANDIDATE_SPEAKER_RAW
 
 # Only used for longest_turns: ignore turns shorter than this when scoring speakers
 CANDIDATE_TURN_MIN_SEC: float = _get_float("CANDIDATE_TURN_MIN_SEC", 3.0)
+# Drop candidate-track segments shorter than this (mis-labeled AI prompts)
+MIN_CANDIDATE_SEGMENT_SEC: float = _get_float("MIN_CANDIDATE_SEGMENT_SEC", 4.0)
+AI_SHORT_TURN_SEC: float = _get_float("AI_SHORT_TURN_SEC", 2.5)
+DIARIZATION_NUM_SPEAKERS: int = max(2, int(_get_float("DIARIZATION_NUM_SPEAKERS", 2)))

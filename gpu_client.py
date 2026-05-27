@@ -133,9 +133,10 @@ class KaggleGPUClient:
         timeout_sec = self.calibrate_timeout if calibrate else self.timeout
         if calibrate:
             if self._calibrate_client is None:
+                connect_sec = float(config.KAGGLE_CALIBRATE_CONNECT_TIMEOUT_SEC)
                 self._calibrate_client = httpx.Client(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(timeout_sec, connect=30.0),
+                    timeout=httpx.Timeout(timeout_sec, connect=connect_sec),
                     headers=self._headers(),
                 )
             return self._calibrate_client
@@ -180,7 +181,7 @@ class KaggleGPUClient:
 
     def calibrate(self, audio_bytes: bytes) -> dict[str, Any] | None:
         """Build GPU reading baseline from calibration audio."""
-        if not self.enabled or not audio_bytes:
+        if not self.enabled or not audio_bytes or not config.KAGGLE_OFFLOAD_CALIBRATION:
             return None
 
         client = self._client_for(calibrate=True)
@@ -225,7 +226,7 @@ class KaggleGPUClient:
             "candidate_speaker": config.CANDIDATE_SPEAKER,
             "num_speakers": "2",
             "segment_mode": config.KAGGLE_SEGMENT_MODE,
-            "min_candidate_sec": str(config.KAGGLE_FAST_MIN_CANDIDATE_SEC),
+            "min_candidate_sec": str(config.MIN_CANDIDATE_SEGMENT_SEC),
         }
         if config.HF_TOKEN:
             data["hf_token"] = config.HF_TOKEN

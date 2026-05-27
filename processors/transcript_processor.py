@@ -69,7 +69,7 @@ def load_whisper_model():
     return _whisper_model
 
 
-def load_whisper_calibration_model():
+def load_whisper_calibration_model(*, skip_filler_check: bool = False):
     """Smaller/faster Whisper for calibration-only transcription."""
     global _whisper_calibration_model
 
@@ -96,14 +96,17 @@ def load_whisper_calibration_model():
             "suppress_tokens": [],
         },
     )
+    if not skip_filler_check:
+        verify_filler_preservation(_whisper_calibration_model)
     return _whisper_calibration_model
 
 
-def preload_models() -> None:
+def preload_models(*, calibration_only: bool = False) -> None:
     """Warm up models at process startup (web server)."""
-    load_whisper_model()
     if config.FAST_CALIBRATION:
-        load_whisper_calibration_model()
+        load_whisper_calibration_model(skip_filler_check=True)
+    if not calibration_only:
+        load_whisper_model()
 
 
 def load_align_model():
@@ -316,7 +319,12 @@ class TranscriptProcessor:
         tokens = {re.sub(r"[^\w']", "", w["word"].lower()) for w in words}
         tokens.discard("")
 
-        if duration >= 5.0 and not (tokens & FILLER_CHECK_TOKENS):
+        # Calibration uses tiny Whisper without align; avoid loading full model for filler fallback.
+        if (
+            not calibration_fast
+            and duration >= 5.0
+            and not (tokens & FILLER_CHECK_TOKENS)
+        ):
             try:
                 import whisper_timestamped  # noqa: F401
 

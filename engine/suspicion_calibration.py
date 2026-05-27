@@ -229,6 +229,14 @@ def resolve_answer_status(
     weak_ratio: float = 0.0,
     longest_weak_streak: int = 0,
     avg_script_similarity: float = 0.0,
+    weak_consistency_score: float = 0.0,
+    persistent_weak_authority_active: bool = False,
+    recovery_strength: float = 0.0,
+    moderate_window_count: int = 0,
+    window_count: int = 0,
+    flat_suspicious_flow_active: bool = False,
+    consistency_authority_score: float = 0.0,
+    natural_breathing_detected: bool = False,
 ) -> tuple[str, str]:
     """
     Returns (status, confidence).
@@ -237,10 +245,48 @@ def resolve_answer_status(
     script_dom = bool(horizon and getattr(horizon, "script_dominance_active", False))
     low_drift = float(getattr(horizon, "low_drift_score", 0.0) or 0.0) if horizon else 0.0
 
-    if weak_only_dominant and strong_ratio < config.PROBABLE_MIN_STRONG_RATIO:
-        if composite >= margin * config.AMBIGUOUS_EWMA_RATIO:
-            return "AMBIGUOUS", "LOW"
+    # Short answers: require reliable evidence volume before AMBIGUOUS.
+    short_unreliable = (
+        duration_sec > 0
+        and (
+            duration_sec <= config.TEMPORAL_SHORT_ANSWER_SEC
+            or window_count < config.TEMPORAL_SHORT_MIN_WINDOWS
+        )
+        and strong_window_count == 0
+        and moderate_window_count < config.SHORT_ANSWER_AMBIGUOUS_MIN_MODERATE_WINDOWS
+    )
+    if short_unreliable and composite < margin * config.SHORT_ANSWER_AMBIGUOUS_COMPOSITE_RATIO:
         return "CLEAR", "LOW"
+
+    # Consistency authority: flat elevated weak flow without strong peaks (Answer 5).
+    if flat_suspicious_flow_active and strong_window_count == 0 and not natural_breathing_detected:
+        if consistency_authority_score >= config.CONSISTENCY_AUTHORITY_MIN_SCORE + 0.10:
+            return "PROBABLE_SCRIPT_READING", "MEDIUM"
+        if (
+            consistency_authority_score >= config.CONSISTENCY_AUTHORITY_MIN_SCORE
+            or weak_consistency_score >= config.PERSISTENT_WEAK_CONSISTENCY_MIN + 0.06
+        ):
+            return "PROBABLE_SCRIPT_READING", "LOW"
+
+    # Persistent weak authority: sustained low-variance guided delivery (tier + contrastive).
+    if persistent_weak_authority_active and strong_window_count == 0:
+        if (
+            composite >= margin * config.WEAK_CLUSTER_PROBABLE_COMPOSITE_RATIO * 0.85
+            or weighted_evidence >= config.AMBIGUOUS_MIN_WEIGHTED_EVIDENCE * 1.1
+            or weak_consistency_score >= config.PERSISTENT_WEAK_CONSISTENCY_MIN + 0.08
+        ):
+            conf = "MEDIUM" if weak_consistency_score >= config.PERSISTENT_WEAK_CONSISTENCY_MIN + 0.12 else "LOW"
+            return "PROBABLE_SCRIPT_READING", conf
+        if composite >= margin * config.WEAK_CLUSTER_AMBIGUOUS_COMPOSITE_RATIO:
+            return "AMBIGUOUS", "MEDIUM"
+
+    if weak_only_dominant and strong_ratio < config.PROBABLE_MIN_STRONG_RATIO:
+        if flat_suspicious_flow_active or consistency_authority_score >= config.CONSISTENCY_AUTHORITY_MIN_SCORE:
+            weak_only_dominant = False
+        elif composite >= margin * config.AMBIGUOUS_EWMA_RATIO:
+            return "AMBIGUOUS", "LOW"
+        else:
+            return "CLEAR", "LOW"
 
     streak_quality = (
         longest_strong_streak >= config.PROBABLE_LONGEST_STREAK_MIN

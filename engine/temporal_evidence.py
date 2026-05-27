@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import config
+import numpy as np
 from engine.suspicion_calibration import (
     SuspicionLevel,
     aggregate_answer_evidence,
@@ -22,6 +23,7 @@ from engine.answer_synthesis import (
     synthesize_final_decision,
 )
 from engine.temporal_persistence import SuspicionMomentumTracker
+from engine.temporal_reliability import compute_temporal_reliability
 
 
 @dataclass
@@ -49,6 +51,7 @@ class TemporalEvidenceTracker:
         self._consecutive_moderate_plus = 0
         self._total_windows = 0
         self._windows: list[WindowEvidence] = []
+        self._ewma_trace: list[float] = []
         self._momentum = SuspicionMomentumTracker()
 
     def reset_answer(self) -> None:
@@ -57,6 +60,7 @@ class TemporalEvidenceTracker:
         self._consecutive_strong = 0
         self._consecutive_moderate_plus = 0
         self._momentum = SuspicionMomentumTracker()
+        self._ewma_trace = []
 
     def observe(
         self,
@@ -110,6 +114,7 @@ class TemporalEvidenceTracker:
             script_similarity=script_similarity,
         )
         self._peak_ewma = max(self._peak_ewma, self._ewma or 0.0)
+        self._ewma_trace.append(float(self._ewma or 0.0))
 
         suspicious = level != SuspicionLevel.NONE
         confidence = self._window_confidence(level=level, script_similarity=script_similarity)
@@ -155,6 +160,43 @@ class TemporalEvidenceTracker:
 
         margin = config.CONTRASTIVE_MARGIN
         ewma = self._ewma or 0.0
+        window_count = len(self._windows)
+
+        def _merge_interval_coverage(intervals: list[tuple[float, float]]) -> float:
+            if not intervals:
+                return 0.0
+            ordered = sorted(intervals, key=lambda x: x[0])
+            total = 0.0
+            cur_s, cur_e = ordered[0]
+            for s, e in ordered[1:]:
+                if s <= cur_e:
+                    cur_e = max(cur_e, e)
+                else:
+                    total += max(0.0, cur_e - cur_s)
+                    cur_s, cur_e = s, e
+            total += max(0.0, cur_e - cur_s)
+            return float(total)
+
+        suspicious_intervals = [
+            (w.start_sec, w.end_sec)
+            for w in self._windows
+            if w.suspicion_level != SuspicionLevel.NONE.value
+        ]
+        weak_intervals = [
+            (w.start_sec, w.end_sec)
+            for w in self._windows
+            if w.suspicion_level == SuspicionLevel.WEAK.value
+        ]
+        suspicious_duration = _merge_interval_coverage(suspicious_intervals)
+        weak_duration = _merge_interval_coverage(weak_intervals)
+        suspicious_coverage_ratio = (
+            suspicious_duration / max(duration, 1e-6) if duration > 0 else 0.0
+        )
+        weak_coverage_ratio = weak_duration / max(duration, 1e-6) if duration > 0 else 0.0
+
+        contrastive_scores = [float(w.contrastive_score) for w in self._windows]
+        suspicion_variance = float(np.var(contrastive_scores)) if contrastive_scores else 0.0
+        suspicion_std = float(np.std(contrastive_scores)) if contrastive_scores else 0.0
 
         window_dicts = [
             {
@@ -191,6 +233,14 @@ class TemporalEvidenceTracker:
         )
         composite_meta.update(momentum_summary)
         composite_meta["streak_boost"] = round(streak_boost, 6)
+        composite_meta["answer_duration_sec"] = round(duration, 4)
+        composite_meta["window_count"] = int(window_count)
+        composite_meta["suspicious_duration_sec"] = round(suspicious_duration, 4)
+        composite_meta["weak_duration_sec"] = round(weak_duration, 4)
+        composite_meta["suspicious_coverage_ratio"] = round(suspicious_coverage_ratio, 4)
+        composite_meta["weak_coverage_ratio"] = round(weak_coverage_ratio, 4)
+        composite_meta["suspicion_variance"] = round(suspicion_variance, 6)
+        composite_meta["suspicion_std"] = round(suspicion_std, 6)
 
         strong_count = int(evidence["strong_count"])
         mod_count = int(evidence["moderate_count"])
@@ -213,9 +263,70 @@ class TemporalEvidenceTracker:
         ):
             weak_only = False
 
+        longest_weak_streak = int(evidence.get("longest_weak_streak", 0))
+
+        recovery_strength = float(
+            compute_answer_behavioral_metrics(
+                window_dicts,
+                horizon=horizon,
+                momentum_summary={"peak_ewma": self._peak_ewma},
+            ).get("recovery_strength", 0.0)
+        )
+
+        reliability = compute_temporal_reliability(
+            window_dicts,
+            duration_sec=duration,
+            suspicious_coverage_ratio=suspicious_coverage_ratio,
+            weak_coverage_ratio=weak_coverage_ratio,
+            suspicion_variance=suspicion_variance,
+            suspicion_std=suspicion_std,
+            longest_weak_streak=longest_weak_streak,
+            recovery_strength=recovery_strength,
+            ewma_values=self._ewma_trace,
+        )
+        composite_meta.update(reliability)
+
+        composite_adjusted = float(composite)
+        short_penalty = float(reliability.get("short_answer_confidence_penalty", 0.0))
+        if short_penalty > 0:
+            composite_adjusted *= 1.0 - short_penalty
+
+        weighted_reliable = float(evidence["weighted_evidence"]) + float(
+            reliability.get("reliability_evidence_boost", 0.0)
+        )
+
+        if reliability.get("persistent_weak_authority_active"):
+            authority_floor = config.PERSISTENT_WEAK_AUTHORITY_COMPOSITE_FLOOR * float(
+                max(
+                    reliability.get("weak_consistency_score", 0.0),
+                    reliability.get("consistency_authority_score", 0.0),
+                )
+            )
+            composite_adjusted = max(composite_adjusted, authority_floor)
+            bonus = (
+                config.PERSISTENT_WEAK_COMPOSITE_BONUS_MAX
+                * float(
+                    max(
+                        reliability.get("weak_consistency_score", 0.0),
+                        reliability.get("consistency_authority_score", 0.0),
+                    )
+                )
+                * min(1.0, duration / max(config.CONSISTENCY_MIN_DURATION_SEC, 1e-6))
+            )
+            if reliability.get("flat_suspicious_flow_active"):
+                bonus += (
+                    config.CONSISTENCY_AUTHORITY_COMPOSITE_BOOST
+                    * float(reliability.get("consistency_authority_score", 0.0))
+                )
+            composite_adjusted = min(1.0, composite_adjusted + bonus)
+            composite_meta["persistent_weak_bonus"] = round(bonus, 6)
+            weak_only = False
+        else:
+            composite_meta["persistent_weak_bonus"] = 0.0
+
         status, confidence = resolve_answer_status(
-            composite=composite,
-            weighted_evidence=evidence["weighted_evidence"],
+            composite=composite_adjusted,
+            weighted_evidence=weighted_reliable,
             strong_ratio=evidence["strong_ratio"],
             moderate_plus_ratio=evidence["moderate_plus_ratio"],
             consecutive_strong=self._consecutive_strong,
@@ -230,19 +341,61 @@ class TemporalEvidenceTracker:
             weak_only_dominant=weak_only,
             suspicion_momentum=float(momentum_summary.get("suspicion_momentum", 0)),
             weak_ratio=float(evidence.get("weak_ratio", 0.0)),
-            longest_weak_streak=int(evidence.get("longest_weak_streak", 0.0)),
+            longest_weak_streak=longest_weak_streak,
             avg_script_similarity=float(avg_script_sim),
+            weak_consistency_score=float(reliability.get("weak_consistency_score", 0.0)),
+            persistent_weak_authority_active=bool(
+                reliability.get("persistent_weak_authority_active")
+            ),
+            flat_suspicious_flow_active=bool(reliability.get("flat_suspicious_flow_active")),
+            consistency_authority_score=float(
+                reliability.get("consistency_authority_score", 0.0)
+            ),
+            natural_breathing_detected=bool(reliability.get("natural_breathing_detected")),
+            recovery_strength=recovery_strength,
+            moderate_window_count=mod_count,
+            window_count=window_count,
         )
 
         susp_ratio = (strong_count + mod_count + weak_count) / max(self._total_windows, 1)
 
+        peak_suspicion = max(contrastive_scores) if contrastive_scores else 0.0
         temporal_layer = {
             "ewma_score": round(ewma, 6),
-            "composite_score": round(composite, 6),
+            "composite_score": round(composite_adjusted, 6),
             "peak_ewma": round(self._peak_ewma, 6),
-            "weighted_evidence": evidence["weighted_evidence"],
+            "peak_suspicion": round(peak_suspicion, 6),
+            "weighted_evidence": round(weighted_reliable, 4),
             "status": status,
             "confidence": confidence,
+            "answer_duration_sec": round(duration, 4),
+            "window_count": int(window_count),
+            "suspicious_coverage_ratio": round(suspicious_coverage_ratio, 4),
+            "weak_coverage_ratio": round(weak_coverage_ratio, 4),
+            "suspicion_variance": round(suspicion_variance, 6),
+            "suspicion_std": round(suspicion_std, 6),
+            "weak_consistency_score": float(reliability.get("weak_consistency_score", 0.0)),
+            "consistency_authority_score": float(
+                reliability.get("consistency_authority_score", 0.0)
+            ),
+            "suspicious_stability_score": float(
+                reliability.get("suspicious_stability_score", 0.0)
+            ),
+            "continuity_authority_score": float(
+                reliability.get("continuity_authority_score", 0.0)
+            ),
+            "elevated_contrastive_ratio": float(
+                reliability.get("elevated_contrastive_ratio", 0.0)
+            ),
+            "flat_suspicious_flow_active": bool(reliability.get("flat_suspicious_flow_active")),
+            "natural_breathing_detected": bool(reliability.get("natural_breathing_detected")),
+            "persistent_weak_authority_active": bool(
+                reliability.get("persistent_weak_authority_active")
+            ),
+            "recovery_strength": round(recovery_strength, 4),
+            "longest_weak_streak": longest_weak_streak,
+            "moderate_window_count": mod_count,
+            "strong_window_count": strong_count,
         }
 
         momentum_for_synthesis = {
@@ -262,7 +415,15 @@ class TemporalEvidenceTracker:
 
         summary = {
             **temporal_layer,
+            "answer_duration_sec": round(duration, 4),
+            "window_count": int(window_count),
             "suspicious_window_ratio": round(susp_ratio, 4),
+            "suspicious_duration_sec": round(suspicious_duration, 4),
+            "weak_suspicious_duration_sec": round(weak_duration, 4),
+            "suspicious_coverage_ratio": round(suspicious_coverage_ratio, 4),
+            "weak_coverage_ratio": round(weak_coverage_ratio, 4),
+            "suspicion_variance": round(suspicion_variance, 6),
+            "suspicion_std": round(suspicion_std, 6),
             "strong_suspicious_ratio": evidence["strong_ratio"],
             "moderate_plus_ratio": evidence["moderate_plus_ratio"],
             "strong_window_count": strong_count,
