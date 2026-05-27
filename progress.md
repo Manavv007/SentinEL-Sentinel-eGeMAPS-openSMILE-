@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-05-27  
 **Repo:** https://github.com/Manavv007/SentinEL-Sentinel-eGeMAPS-openSMILE-  
-**Latest commit:** *(pending push)* — temporal reliability, calibration speed, local diarization fixes
+**Latest commit:** `2f07d31` — temporal reliability, calibration speed, local diarization fixes
 
 This file is the handoff document for any agent continuing work. Read it before changing scoring, pipeline, or Kaggle integration.
 
@@ -202,7 +202,7 @@ python scripts/test_kaggle_gpu.py
 ## 10. Git History (Recent)
 
 ```
-(pending)  Temporal reliability, consistency authority, calibration speed, diarization fixes
+2f07d31    Temporal reliability, consistency authority, calibration speed, diarization fixes
 ef497a0    Add Kaggle interview segmentation and cognitive spontaneity scoring
 d57fa7f    SentinEL v6 - contrastive engine, answer synthesis, profile purity
 ```
