@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-05-28  
 **Repo:** https://github.com/Manavv007/SentinEL-Sentinel-eGeMAPS-openSMILE-  
-**Latest commit:** *(this push)* — intra-individual behavioral modeling, Kaggle ngrok auth fix
+**Latest commit:** `423c03f` — intra-individual behavioral modeling, Kaggle ngrok auth fix
 
 This file is the handoff document for any agent continuing work. Read it before changing scoring, pipeline, or Kaggle integration.
 
@@ -290,7 +290,7 @@ python scripts/test_kaggle_gpu.py
 ## 10. Git History (Recent)
 
 ```
-(latest)   Intra-individual behavioral modeling + Kaggle ngrok Secrets fix
+423c03f    Intra-individual behavioral modeling + Kaggle ngrok Secrets fix
 a638bb9    Cognitive sourcing inference, speed optimizations, timeline UI, profile disentanglement
 6855a91    Update progress.md with commit 2f07d31
 2f07d31    Temporal reliability, calibration speed, local diarization fixes
