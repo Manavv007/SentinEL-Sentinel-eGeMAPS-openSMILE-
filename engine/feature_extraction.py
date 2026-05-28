@@ -190,6 +190,18 @@ def _entropy(values: list[float]) -> float:
     return float(-np.sum(p * np.log2(p + 1e-12)))
 
 
+def slice_timeline(
+    timeline: list[dict[str, Any]], start_sec: float, end_sec: float
+) -> list[dict[str, Any]]:
+    return [
+        f
+        for f in timeline
+        if float(f.get("timestamp_sec", 0)) >= start_sec
+        and float(f.get("timestamp_sec", 0)) < end_sec
+        and f.get("face_detected")
+    ]
+
+
 def _repetition_rate(tokens: list[str]) -> float:
     if len(tokens) < 2:
         return 0.0

@@ -335,6 +335,22 @@ def run_calibrate(
         decision="This profile represents how the user sounds while reading.",
     )
 
+    personal_baseline = None
+    if config.ENABLE_INTRA_INDIVIDUAL:
+        from engine.intra_individual import build_calibration_personal_baseline
+
+        personal_baseline = build_calibration_personal_baseline(
+            answers,
+            transcripts=cal_transcripts,
+            timeline=timeline,
+        )
+        log.log(
+            "personal_baseline",
+            "Personal speaking baseline seeded from calibration",
+            phase="calibrate",
+            metrics=personal_baseline.summary(),
+        )
+
     profile = {
         "version": 5,
         "source_video": str(video),
@@ -349,6 +365,8 @@ def run_calibrate(
         "calibration_windows": len(windows),
         "timeline_frames": 0,
         "contrastive_engine": True,
+        "personal_baseline": personal_baseline.to_dict() if personal_baseline else None,
+        "intra_individual_modeling": config.ENABLE_INTRA_INDIVIDUAL,
     }
     save_baseline_profile(profile, out_path)
 
@@ -441,6 +459,18 @@ def run_analyze(
             "NATURAL profile starts empty (no first-N-seconds assumption)",
             phase="analyze",
             decision="Only high-naturality windows will update NATURAL profile.",
+        )
+
+    intra_session = None
+    if config.ENABLE_INTRA_INDIVIDUAL:
+        from engine.intra_individual import IntraIndividualSession
+
+        intra_session = IntraIndividualSession.from_profile(profile)
+        log.log(
+            "personal_baseline",
+            "Intra-individual modeling active — deviation from personal baseline",
+            phase="analyze",
+            metrics=intra_session.baseline.summary(),
         )
 
     use_kaggle_segment = gpu_client.offload_segmentation_active
@@ -691,6 +721,42 @@ def run_analyze(
                     ),
                 )
 
+        if intra_session is not None:
+            intra_block = intra_session.process_answer(
+                answer,
+                transcript,
+                timeline,
+                contrastive_summary=contrastive_summary,
+            )
+            fused = intra_session.finalize_answer(
+                fused,
+                intra_block,
+                answer=answer,
+                transcript=transcript,
+                timeline=timeline,
+                contrastive_summary=contrastive_summary,
+            )
+            log.log(
+                "intra_individual",
+                f"Answer {aid}: P(external)={intra_block.get('p_external_guidance', 0):.2f}",
+                phase="analyze",
+                metrics={
+                    "answer_id": aid,
+                    "p_external": intra_block.get("p_external_guidance"),
+                    "rel_mean_deviation": (intra_block.get("person_relative") or {}).get(
+                        "rel_mean_deviation"
+                    ),
+                    "intra_turbulence_suppression": (
+                        intra_block.get("intra_answer_turbulence") or {}
+                    ).get("intra_turbulence_suppression"),
+                    "cognitive_cost_flatness": (intra_block.get("cognitive_cost") or {}).get(
+                        "cognitive_cost_flatness"
+                    ),
+                    "intra_status": intra_block.get("intra_status"),
+                },
+                decision=fused.get("status"),
+            )
+
         log.log(
             "answer",
             f"Answer {aid}: {fused['status']}",
@@ -736,6 +802,17 @@ def run_analyze(
 
         results_answers, session_sourcing = finalize_interview_sourcing(results_answers)
 
+    session_intra: dict[str, Any] = {}
+    if intra_session is not None:
+        results_answers, session_intra = intra_session.finalize_session(results_answers)
+        log.log(
+            "intra_individual_session",
+            f"Session P(external)={session_intra.get('session_probability', {}).get('p_external_final', 0):.2f}",
+            phase="analyze",
+            metrics=session_intra.get("cross_answer_drift"),
+            decision=f"drift_uniformity={session_intra.get('cross_answer_drift', {}).get('cross_answer_uniformity')}",
+        )
+
     payload: dict[str, Any] = {
         "version": 5 if use_contrastive else 4,
         "video": str(video),
@@ -753,6 +830,8 @@ def run_analyze(
         payload["profiles_end"] = contrastive.export_profiles()
         if config.ENABLE_COGNITIVE_SOURCING:
             payload["session_sourcing_inference"] = session_sourcing
+        if session_intra:
+            payload["session_intra_individual"] = session_intra
 
     alerts = sum(1 for a in results_answers if a.get("status") == "PROBABLE_SCRIPT_READING")
     log.log(
