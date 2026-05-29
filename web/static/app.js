@@ -86,7 +86,54 @@ function updateAnalyzeBtn() {
   $("#btnAnalyze").disabled = !(hasVideo && hasCal);
 }
 
-function pollJob(jobId, { box, bar, msg, onDone, fetchResult = false }) {
+function formatProgressMessage(text) {
+  const raw = String(text || "");
+  return escapeHtml(raw)
+    .replace(
+      /\[Kaggle GPU\]/g,
+      '<span class="runtime-tag tag-kaggle">Kaggle GPU</span>',
+    )
+    .replace(
+      /\[Local CPU\]/g,
+      '<span class="runtime-tag tag-local">Local CPU</span>',
+    )
+    .replace(
+      /\[Local \+ Kaggle\]/g,
+      '<span class="runtime-tag tag-hybrid">Local + Kaggle</span>',
+    );
+}
+
+function runtimeBadgeFromMessage(text) {
+  const t = String(text || "");
+  if (t.includes("[Local + Kaggle]")) {
+    return { label: "Local + Kaggle", cls: "tag-hybrid" };
+  }
+  if (t.includes("[Kaggle GPU]")) {
+    return { label: "Kaggle GPU", cls: "tag-kaggle" };
+  }
+  if (t.includes("[Local CPU]")) {
+    return { label: "Local CPU", cls: "tag-local" };
+  }
+  return null;
+}
+
+function setProgressMessage(msgEl, badgeEl, message) {
+  if (msgEl) {
+    msgEl.innerHTML = formatProgressMessage(message);
+  }
+  if (badgeEl) {
+    const badge = runtimeBadgeFromMessage(message);
+    if (badge) {
+      badgeEl.textContent = badge.label;
+      badgeEl.className = `runtime-badge ${badge.cls}`;
+      badgeEl.classList.remove("hidden");
+    } else {
+      badgeEl.classList.add("hidden");
+    }
+  }
+}
+
+function pollJob(jobId, { box, bar, msg, badge, onDone, fetchResult = false }) {
   if (pollTimer) clearInterval(pollTimer);
 
   let failStreak = 0;
@@ -102,14 +149,14 @@ function pollJob(jobId, { box, bar, msg, onDone, fetchResult = false }) {
       failStreak = 0;
 
       bar.style.width = `${job.progress}%`;
-      msg.textContent = job.message;
+      setProgressMessage(msg, badge, job.message);
       renderLogs(job.logs || []);
 
       if (job.status === "done") {
         clearInterval(pollTimer);
         pollTimer = null;
         if (fetchResult) {
-          msg.textContent = "Loading results…";
+          setProgressMessage(msg, badge, "Loading results…");
           const rr = await fetch(`/api/jobs/${jobId}/result`);
           if (!rr.ok) throw new Error(`Could not load results (HTTP ${rr.status})`);
           const full = await rr.json();
@@ -212,6 +259,7 @@ $("#btnAnalyze").addEventListener("click", async () => {
       box: $("#anJobBox"),
       bar: $("#anProgress"),
       msg: $("#anMsg"),
+      badge: $("#anRuntimeBadge"),
       fetchResult: true,
       onDone: (job) => {
         $("#btnAnalyze").disabled = false;
@@ -260,7 +308,7 @@ function renderLogs(logs) {
 
       div.innerHTML = `<span class="ts">${(e.ts || "").slice(11, 19)}</span> `
         + `<span class="step">[${e.phase}/${e.step}]</span> `
-        + `${escapeHtml(e.message)}${escapeHtml(decision)}${escapeHtml(metrics)}`;
+        + `${formatProgressMessage(e.message)}${escapeHtml(decision)}${escapeHtml(metrics)}`;
       stream.appendChild(div);
     });
   stream.scrollTop = stream.scrollHeight;

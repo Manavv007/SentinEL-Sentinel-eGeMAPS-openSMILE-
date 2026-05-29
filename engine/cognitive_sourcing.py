@@ -658,6 +658,17 @@ def apply_session_sourcing_refinement(
 
         status = str(ans.get("status", "CLEAR"))
         reasons: list[str] = list(contrastive.get("sourcing_refinement_reasons") or [])
+        strong_n = int(behavioral.get("strong_window_count", 0) or 0)
+        essay_guided = float(behavioral.get("essay_like_guidedness_score", 0.0) or 0.0)
+        intra = ans.get("intra_individual") or {}
+        p_intra = float(intra.get("p_external_guidance", 0.5))
+        spec = ans.get("semantic_specificity") or {}
+        personal_natural = False
+        if spec:
+            from engine.semantic_specificity import is_personal_natural_answer
+
+            personal_natural = is_personal_natural_answer(spec)
+        mem_tech = float(spec.get("memorized_technical_script_score", 0.0))
 
         # Session-level promotion when persistent external sourcing dominates
         promote_probable = (
@@ -665,8 +676,15 @@ def apply_session_sourcing_refinement(
             and ext >= config.ANSWER_EXTERNAL_LIKELIHOOD_PROMOTE_MIN
             and soft >= config.SOURCING_SOFT_EVIDENCE_MIN
             and ext > internal + config.SOURCING_LIKELIHOOD_MARGIN
-            and inter_uniform >= config.SESSION_UNIFORMITY_PROMOTE_MIN
             and not prepared_active
+            and not personal_natural
+            and (
+                status == "PROBABLE_SCRIPT_READING"
+                or strong_n >= config.SESSION_SOURCING_MIN_STRONG_WINDOWS
+                or essay_guided >= config.ESSAY_LIKE_GUIDEDNESS_MIN
+                or mem_tech >= config.MEMORIZED_TECHNICAL_PROBABLE_MIN
+            )
+            and p_intra >= config.SESSION_P_AMBIGUOUS_LOW
         )
         promote_ambiguous = (
             not promote_probable
@@ -674,6 +692,8 @@ def apply_session_sourcing_refinement(
             and soft >= config.SOURCING_SOFT_EVIDENCE_MIN * 0.75
             and ext > internal
             and status == "CLEAR"
+            and not personal_natural
+            and mem_tech < config.MEMORIZED_TECHNICAL_PROBABLE_MIN
         )
 
         new_status = status

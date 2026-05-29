@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 import config
 from engine.profile_memory import BehavioralProfile
 
@@ -43,8 +45,8 @@ COGNITIVE_GUIDANCE_WEIGHTS: dict[str, float] = {
     "ling_technical_density": 0.40,
 }
 
-# Stored in SCRIPT profile at calibration — cognitive + selective linguistic only.
-SCRIPT_CALIBRATION_KEEP_PREFIXES = ("cog_",)
+# Stored in SCRIPT profile at calibration — cognitive + acoustic + selective linguistic.
+SCRIPT_CALIBRATION_KEEP_PREFIXES = ("cog_", "acoustic_")
 SCRIPT_CALIBRATION_KEEP_EXACT = frozenset(
     {
         "ling_self_corrections",
@@ -113,16 +115,35 @@ def natural_metric_weights(feature_keys: set[str] | frozenset[str]) -> dict[str,
 
 
 def filter_features_for_script_calibration(features: dict[str, float]) -> dict[str, float]:
-    """Keep cognitive-guidance features when building SCRIPT profile from calibration."""
+    """Keep cognitive-guidance + acoustic features when building SCRIPT profile from calibration."""
     if not config.SCRIPT_PROFILE_PURIFY_CALIBRATION:
-        return dict(features)
+        return {k: v for k, v in features.items() if np.isfinite(v)}
+
     out: dict[str, float] = {}
     for key, value in features.items():
+        if not np.isfinite(value):
+            continue
         if key.startswith(SCRIPT_CALIBRATION_KEEP_PREFIXES):
             out[key] = value
         elif key in SCRIPT_CALIBRATION_KEEP_EXACT:
             out[key] = value
     return out
+
+
+def calibration_feature_row(features: dict[str, float]) -> dict[str, float]:
+    """
+    Build a non-empty SCRIPT calibration row.
+    Purified cognitive/linguistic/acoustic first; fall back to acoustic+ling if empty.
+    """
+    row = filter_features_for_script_calibration(features)
+    if row:
+        return row
+    # Transcript/cognitive missing — acoustic reading fingerprint still valid
+    return {
+        k: float(v)
+        for k, v in features.items()
+        if (k.startswith("acoustic_") or k.startswith("ling_")) and np.isfinite(v)
+    }
 
 
 def compute_profile_similarity_bundle(

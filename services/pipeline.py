@@ -72,14 +72,27 @@ class PipelineLogger:
         return list(self.entries)
 
 
+def _tag_message(message: str, backend: str | None) -> str:
+    """Prefix progress text with a visible runtime tag for the web UI."""
+    if backend == "kaggle":
+        return f"[Kaggle GPU] {message}"
+    if backend == "local":
+        return f"[Local CPU] {message}"
+    if backend == "hybrid":
+        return f"[Local + Kaggle] {message}"
+    return message
+
+
 def _emit(
     cb: ProgressCallback | None,
     percent: int,
     message: str,
     log_entry: dict[str, Any] | None = None,
+    *,
+    backend: str | None = None,
 ) -> None:
     if cb:
-        cb(percent, message, log_entry)
+        cb(percent, _tag_message(message, backend), log_entry)
 
 
 def _startup_models(
@@ -100,9 +113,12 @@ def _startup_models(
     if use_kaggle_asr:
         log.log(
             "startup",
-            "Kaggle GPU offload active — skipping local Whisper load for interview",
+            _tag_message(
+                "Kaggle GPU offload active — skipping local Whisper load for interview",
+                "kaggle",
+            ),
             phase="system",
-            metrics={"kaggle_url": config.KAGGLE_GPU_URL},
+            metrics={"kaggle_url": config.KAGGLE_GPU_URL, "runtime": "kaggle"},
         )
         return gpu_client
 
@@ -152,9 +168,16 @@ def _kaggle_prefetch_answers(
 
     log.log(
         "kaggle_prefetch",
-        f"Offloading {n} answer(s) to Kaggle GPU (workers={workers})",
+        _tag_message(
+            f"Offloading {n} answer(s) to Kaggle GPU (workers={workers})",
+            "kaggle",
+        ),
         phase="analyze",
-        metrics={"parallel_workers": workers, "has_gpu_profile": bool(gpu_reading_profile)},
+        metrics={
+            "parallel_workers": workers,
+            "has_gpu_profile": bool(gpu_reading_profile),
+            "runtime": "kaggle",
+        },
     )
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_one, i, a) for i, a in enumerate(answers)]
@@ -322,16 +345,64 @@ def run_calibrate(
     _emit(progress, 85, "Building SCRIPT behavioral profile...")
 
     contrastive = ContrastiveEngine()
-    script_profile = contrastive.build_script_profile_from_calibration(
+    script_profile, script_diag = contrastive.build_script_profile_from_calibration(
         answers,
         transcripts=cal_transcripts,
         timeline=timeline,
     )
+    natural_seed = contrastive.build_natural_seed_from_calibration(
+        answers,
+        transcripts=cal_transcripts,
+        timeline=timeline,
+    )
+
+    log.log(
+        "script_profile_build",
+        "SCRIPT profile feature extraction",
+        phase="calibrate",
+        metrics=script_diag,
+    )
+
+    if len(windows) < config.MIN_CALIBRATION_WINDOWS:
+        msg = (
+            f"Calibration produced only {len(windows)} acoustic windows "
+            f"(minimum {config.MIN_CALIBRATION_WINDOWS}). "
+            "Use a longer calibration clip with clear speech."
+        )
+        if config.CALIBRATION_FAIL_SOFT:
+            log.log("script_profile", msg, phase="calibrate", level="warning")
+        else:
+            raise ValueError(msg)
+
+    if script_profile.sample_count < config.MIN_SCRIPT_PROFILE_SAMPLES:
+        msg = (
+            f"SCRIPT behavioral profile has {script_profile.sample_count} samples "
+            f"(minimum {config.MIN_SCRIPT_PROFILE_SAMPLES}). "
+            f"Diagnostics: {script_diag}. "
+            "Check calibration transcription and audio quality."
+        )
+        if config.CALIBRATION_FAIL_SOFT:
+            log.log("script_profile", msg, phase="calibrate", level="warning")
+            script_profile = contrastive.build_population_script_fallback(reading_profile)
+            log.log(
+                "script_profile",
+                "Using population acoustic prior fallback for SCRIPT profile",
+                phase="calibrate",
+                level="warning",
+                metrics={"samples": script_profile.sample_count},
+            )
+        else:
+            raise ValueError(msg)
+
     log.log(
         "script_profile",
         "SCRIPT profile built from intentional reading windows",
         phase="calibrate",
-        metrics={"samples": script_profile.sample_count},
+        metrics={
+            "samples": script_profile.sample_count,
+            "natural_seed_samples": natural_seed.sample_count,
+            **script_diag,
+        },
         decision="This profile represents how the user sounds while reading.",
     )
 
@@ -358,6 +429,8 @@ def run_calibrate(
         "acoustic_reading_profile": reading_profile,
         "gpu_reading_profile": gpu_reading_profile,
         "script_profile": script_profile.to_dict(),
+        "natural_profile_seed": natural_seed.to_dict(),
+        "script_build_diagnostics": script_diag,
         "linguistic_calibration": linguistic_calibration,
         "gaze_calibration": {},
         "lip_calibration": {},
@@ -413,7 +486,12 @@ def run_analyze(
     t0 = time.perf_counter()
     out_path = Path(output_path) if output_path else None
 
-    _emit(progress, 2, "Starting analysis...", log.log("start", f"Interview: {video.name}", phase="analyze"))
+    _emit(
+        progress,
+        2,
+        "Starting analysis...",
+        log.log("start", f"Interview: {video.name}", phase="analyze"),
+    )
 
     reading_profile = profile.get("acoustic_reading_profile")
     if not reading_profile:
@@ -423,7 +501,15 @@ def run_analyze(
     linguistic_calibration = profile.get("linguistic_calibration", {})
 
     gpu_client = _startup_models(log)
-    _emit(progress, 5, "Models loaded", None)
+    use_kaggle_asr_plan = gpu_client.offload_active
+    asr_plan = "Kaggle GPU" if use_kaggle_asr_plan else f"Local CPU ({config.WHISPER_MODEL_SIZE})"
+    _emit(
+        progress,
+        5,
+        f"Models loaded — transcription: {asr_plan}, diarization: Local CPU",
+        None,
+        backend="local",
+    )
 
     audio = AudioProcessor()
     transcript_proc = TranscriptProcessor()
@@ -454,31 +540,76 @@ def run_analyze(
         )
     if use_contrastive:
         contrastive.reset_interview()
-        log.log(
-            "natural_profile",
-            "NATURAL profile starts empty (no first-N-seconds assumption)",
-            phase="analyze",
-            decision="Only high-naturality windows will update NATURAL profile.",
-        )
+        seed_samples = contrastive.seed_natural_profile(profile.get("natural_profile_seed"))
+        if seed_samples > 0:
+            log.log(
+                "natural_profile",
+                f"NATURAL profile seeded from calibration voice anchor ({seed_samples} samples)",
+                phase="analyze",
+                metrics={"natural_profile_samples": seed_samples},
+            )
+        else:
+            log.log(
+                "natural_profile",
+                "NATURAL profile not seeded — will learn from high-naturality interview windows",
+                phase="analyze",
+                level="warning",
+                decision="Re-calibrate to store natural_profile_seed.",
+            )
 
+        if contrastive.script_profile.sample_count <= 0:
+            contrastive.script_profile = contrastive.build_population_script_fallback(
+                reading_profile
+            )
+            log.log(
+                "script_profile",
+                "SCRIPT profile empty — using population acoustic priors from reading profile",
+                phase="analyze",
+                level="warning",
+                metrics={"samples": contrastive.script_profile.sample_count},
+                decision="Re-run calibrate for a proper SCRIPT behavioral profile.",
+            )
+
+    from engine.cross_answer_content import SessionEvidenceAccumulator
+    from engine.semantic_specificity import (
+        apply_specificity_to_status,
+        compute_semantic_specificity,
+    )
+
+    session_accumulator = SessionEvidenceAccumulator()
+    null_video_channels = 0
     intra_session = None
     if config.ENABLE_INTRA_INDIVIDUAL:
         from engine.intra_individual import IntraIndividualSession
 
         intra_session = IntraIndividualSession.from_profile(profile)
-        log.log(
-            "personal_baseline",
-            "Intra-individual modeling active — deviation from personal baseline",
-            phase="analyze",
-            metrics=intra_session.baseline.summary(),
-        )
+        baseline_summary = intra_session.baseline.summary()
+        if intra_session.baseline.is_unseeded():
+            log.log(
+                "personal_baseline",
+                "Personal baseline empty — re-run calibrate to seed from calibration clip",
+                phase="analyze",
+                level="warning",
+                metrics=baseline_summary,
+                decision="Interview will bootstrap baseline from first answers (less reliable until seeded).",
+            )
+        else:
+            log.log(
+                "personal_baseline",
+                "Intra-individual modeling active — deviation from personal baseline",
+                phase="analyze",
+                metrics=baseline_summary,
+            )
 
     use_kaggle_segment = gpu_client.offload_segmentation_active
     if use_kaggle_segment:
-        log.log(
-            "kaggle_segment",
-            f"Kaggle segmentation ({config.KAGGLE_SEGMENT_MODE}) — local pyannote skipped",
-            phase="analyze",
+            log.log(
+                "kaggle_segment",
+                _tag_message(
+                    f"Kaggle segmentation ({config.KAGGLE_SEGMENT_MODE}) — local pyannote skipped",
+                    "kaggle",
+                ),
+                phase="analyze",
             metrics={
                 "kaggle_url": config.KAGGLE_GPU_URL,
                 "segment_mode": config.KAGGLE_SEGMENT_MODE,
@@ -488,18 +619,22 @@ def run_analyze(
                 "transcribe_only": config.KAGGLE_TRANSCRIBE_ONLY,
             },
         )
-    av_msg = (
-        f"Kaggle {config.KAGGLE_SEGMENT_MODE} segment + local windows..."
-        if use_kaggle_segment
-        else "Processing interview audio..."
-    )
-    _emit(progress, 12, av_msg)
+    if use_kaggle_segment:
+        av_msg = f"Segmentation ({config.KAGGLE_SEGMENT_MODE}) + local feature windows..."
+        av_backend = "hybrid"
+    else:
+        av_msg = "Diarization + acoustic windows..."
+        av_backend = "local"
+    _emit(progress, 12, av_msg, backend=av_backend)
 
     def _run_audio() -> list[dict[str, Any]]:
         if not use_kaggle_segment:
             log.log(
                 "audio",
-                "Local pyannote diarization (recommended for AI vs candidate accuracy)",
+                _tag_message(
+                    "Local pyannote diarization (recommended for AI vs candidate accuracy)",
+                    "local",
+                ),
                 phase="analyze",
                 metrics={
                     "candidate_speaker": config.CANDIDATE_SPEAKER,
@@ -559,10 +694,25 @@ def run_analyze(
         # Video gaze/lip scanning removed (performance + robustness).
         return {"timeline_path": "", "timeline": [], "native_fps": 0.0}
 
+    if not use_kaggle_segment:
+        _emit(
+            progress,
+            14,
+            "Diarizing interview audio (pyannote — may take several minutes)...",
+            backend="local",
+        )
+
     t_av = time.perf_counter()
     interview_answers = _run_audio()
     video_result = _run_video()
     av_sec = round(time.perf_counter() - t_av, 2)
+    seg_tag = "kaggle" if use_kaggle_segment else "local"
+    _emit(
+        progress,
+        24,
+        f"Audio ready: {len(interview_answers)} answer segment(s) ({av_sec}s)",
+        backend=seg_tag,
+    )
 
     speaker_sel = audio.last_speaker_selection or {}
     log.log(
@@ -585,7 +735,12 @@ def run_analyze(
     use_kaggle_asr = gpu_client.offload_active and bool(interview_answers)
 
     if use_kaggle_asr:
-        _emit(progress, 28, "Kaggle GPU transcription (parallel)...")
+        _emit(
+            progress,
+            28,
+            f"Transcription (parallel, {config.KAGGLE_PARALLEL_ANSWERS} workers)...",
+            backend="kaggle",
+        )
         kaggle_cache = _kaggle_prefetch_answers(
             gpu_client,
             interview_answers,
@@ -593,19 +748,25 @@ def run_analyze(
             log,
         )
     elif interview_answers:
-        _emit(progress, 28, f"Local Whisper transcription ({config.WHISPER_MODEL_SIZE})...")
+        _emit(
+            progress,
+            28,
+            f"Transcription (Whisper {config.WHISPER_MODEL_SIZE})...",
+            backend="local",
+        )
         t_asr = time.perf_counter()
         local_transcript_cache = transcript_proc.transcribe_answers(interview_answers)
         asr_sec = round(time.perf_counter() - t_asr, 2)
         log.log(
             "asr",
-            f"Local interview transcription batch ({asr_sec}s)",
+            _tag_message(f"Local interview transcription batch ({asr_sec}s)", "local"),
             phase="analyze",
             metrics={
                 "answers": len(interview_answers),
                 "elapsed_sec": asr_sec,
                 "skip_align": config.WHISPER_SKIP_ALIGN_INTERVIEW,
                 "model": config.WHISPER_MODEL_SIZE,
+                "runtime": "local",
             },
         )
 
@@ -615,7 +776,14 @@ def run_analyze(
     for idx, answer in enumerate(interview_answers):
         pct = 30 + int(55 * (idx / n_answers))
         aid = answer["answer_id"]
-        _emit(progress, pct, f"Scoring answer {aid + 1}/{n_answers}...")
+        score_backend = "hybrid" if kaggle_cache is not None else "local"
+        _emit(
+            progress,
+            pct,
+            f"Scoring answer {aid + 1}/{n_answers} (acoustic + contrastive local; ASR from "
+            f"{'Kaggle GPU' if kaggle_cache is not None else 'local'})...",
+            backend=score_backend,
+        )
 
         ac_score, ac_breakdown = engine.score_answer(answer["windows"], reading_profile)
         duration = float(answer["end_sec"]) - float(answer["start_sec"])
@@ -672,11 +840,18 @@ def run_analyze(
                 ling_score, transcript, duration
             )
 
+        semantic_spec: dict[str, Any] = {}
+        specificity_score: float | None = None
+        if config.ENABLE_SEMANTIC_SPECIFICITY:
+            semantic_spec = compute_semantic_specificity(transcript)
+            specificity_score = float(semantic_spec.get("generic_script_likelihood", 0.0))
+
         fused = scorer.score_answer(
             answer_id=answer["answer_id"],
             scores={
                 "acoustic": ac_score,
                 "linguistic": ling_score,
+                "specificity": specificity_score,
                 "gaze": gaze_score,
                 "lip": lip_score,
                 "gpu": gpu,
@@ -684,6 +859,8 @@ def run_analyze(
             start_sec=answer["start_sec"],
             end_sec=answer["end_sec"],
         )
+        fused_scorer_ewma = float(fused.get("smoothed_score", 0.0))
+        null_video_channels += 1
 
         contrastive_summary: dict | None = None
         if use_contrastive:
@@ -691,9 +868,17 @@ def run_analyze(
             fused["contrastive"] = contrastive_summary
             fused["confidence"] = contrastive_summary.get("confidence", "LOW")
             fused["status"] = contrastive_summary.get("status", fused["status"])
-            fused["smoothed_score"] = contrastive_summary.get(
-                "composite_score",
-                contrastive_summary.get("ewma_score", fused["smoothed_score"]),
+            contrastive_composite = float(
+                contrastive_summary.get("composite_score")
+                or contrastive_summary.get("ewma_score")
+                or 0.0
+            )
+            fused["contrastive_composite"] = contrastive_composite
+            fused["fused_scorer_ewma"] = fused_scorer_ewma
+            fused["smoothed_score"] = (
+                contrastive_composite
+                if contrastive_composite > 0
+                else fused_scorer_ewma
             )
             fused["ewma_score"] = fused["smoothed_score"]
 
@@ -757,6 +942,77 @@ def run_analyze(
                 decision=fused.get("status"),
             )
 
+        if config.ENABLE_SEMANTIC_SPECIFICITY and semantic_spec:
+            beh = (contrastive_summary or {}).get("behavioral_synthesis") or {}
+            ext_like = float(beh.get("external_sourcing_likelihood", 0.0) or 0.0)
+            int_like = float(beh.get("internal_generation_likelihood", 0.0) or 0.0)
+            session_snap = session_accumulator.after_answer(
+                answer_id=aid,
+                transcript=transcript,
+                generic_script_likelihood=float(
+                    semantic_spec.get("generic_script_likelihood", 0.0)
+                ),
+                contrastive_external=ext_like,
+                contrastive_internal=int_like,
+            )
+            content_prof = session_snap.get("content_profile") or {}
+            prior_status = str(fused.get("status", "CLEAR"))
+            weighted_ev = float(
+                (contrastive_summary or {}).get("weighted_evidence")
+                or ((contrastive_summary or {}).get("composite_meta") or {}).get(
+                    "weighted_evidence", 0.0
+                )
+                or 0.0
+            )
+            new_status, spec_reasons = apply_specificity_to_status(
+                prior_status,
+                semantic_spec,
+                session_external_prior=float(
+                    session_snap.get("session_external_prior", 0.5)
+                ),
+                content_uniformity=float(content_prof.get("content_uniformity", 0.0)),
+                answer_index=idx,
+                contrastive_external=ext_like,
+                weighted_evidence=weighted_ev,
+            )
+            if new_status != prior_status:
+                fused["status"] = new_status
+                if contrastive_summary is not None:
+                    contrastive_summary["status"] = new_status
+                    existing = contrastive_summary.get("decision_explanation") or []
+                    if not isinstance(existing, list):
+                        existing = [str(existing)]
+                    for r in spec_reasons:
+                        if r not in existing:
+                            existing.append(r)
+                    contrastive_summary["decision_explanation"] = existing
+
+            fused["semantic_specificity"] = semantic_spec
+            fused["session_feedforward"] = session_snap
+            log.log(
+                "semantic_specificity",
+                f"Answer {aid}: specificity={semantic_spec.get('specificity_score', 0):.2f} "
+                f"generic={semantic_spec.get('generic_script_likelihood', 0):.2f}",
+                phase="analyze",
+                metrics={
+                    "answer_id": aid,
+                    **semantic_spec,
+                    "session_external_prior": session_snap.get("session_external_prior"),
+                    "content_uniformity": content_prof.get("content_uniformity"),
+                },
+                decision=fused.get("status"),
+            )
+
+        if null_video_channels >= 2 and idx == 1:
+            log.log(
+                "video",
+                "Gaze/lip unavailable for all answers (video scanning disabled)",
+                phase="analyze",
+                level="warning",
+                metrics={"null_gaze_lip_answers": null_video_channels},
+                decision="Acoustic + linguistic + specificity channels only.",
+            )
+
         log.log(
             "answer",
             f"Answer {aid}: {fused['status']}",
@@ -771,6 +1027,13 @@ def run_analyze(
                 "lip": None,
                 "fused_raw": fused.get("raw_score"),
                 "fused_ewma": fused.get("smoothed_score"),
+                "fused_scorer_ewma": fused.get("fused_scorer_ewma", fused_scorer_ewma),
+                "specificity_score": (
+                    semantic_spec.get("specificity_score") if semantic_spec else None
+                ),
+                "generic_script_likelihood": (
+                    semantic_spec.get("generic_script_likelihood") if semantic_spec else None
+                ),
                 "confidence": fused.get("confidence"),
                 "contrastive_ewma": (
                     contrastive_summary.get("composite_score")
@@ -802,6 +1065,41 @@ def run_analyze(
 
         results_answers, session_sourcing = finalize_interview_sourcing(results_answers)
 
+    # Final transcript-authority pass — session sourcing must not override personal answers
+    if config.ENABLE_SEMANTIC_SPECIFICITY:
+        content_prof = session_accumulator.content.session_profile()
+        for ans in results_answers:
+            spec = ans.get("semantic_specificity")
+            if not spec:
+                continue
+            c = ans.get("contrastive") or {}
+            beh = c.get("behavioral_synthesis") or {}
+            weighted_ev = float(
+                c.get("weighted_evidence")
+                or (c.get("composite_meta") or {}).get("weighted_evidence", 0.0)
+                or 0.0
+            )
+            new_status, spec_reasons = apply_specificity_to_status(
+                str(ans.get("status", "CLEAR")),
+                spec,
+                session_external_prior=session_accumulator.session_external_prior,
+                content_uniformity=float(content_prof.get("content_uniformity", 0.0)),
+                answer_index=int(ans.get("answer_id", 0)),
+                contrastive_external=float(beh.get("external_sourcing_likelihood", 0.0) or 0.0),
+                weighted_evidence=weighted_ev,
+            )
+            if new_status != ans.get("status"):
+                ans["status"] = new_status
+                if c:
+                    c["status"] = new_status
+                    existing = c.get("decision_explanation") or []
+                    if not isinstance(existing, list):
+                        existing = [str(existing)]
+                    for r in spec_reasons:
+                        if r not in existing:
+                            existing.append(r)
+                    c["decision_explanation"] = existing
+
     session_intra: dict[str, Any] = {}
     if intra_session is not None:
         results_answers, session_intra = intra_session.finalize_session(results_answers)
@@ -832,6 +1130,10 @@ def run_analyze(
             payload["session_sourcing_inference"] = session_sourcing
         if session_intra:
             payload["session_intra_individual"] = session_intra
+        payload["session_content_analysis"] = session_accumulator.content.session_profile()
+        payload["session_feedforward_prior"] = round(
+            session_accumulator.session_external_prior, 4
+        )
 
     alerts = sum(1 for a in results_answers if a.get("status") == "PROBABLE_SCRIPT_READING")
     log.log(
@@ -850,7 +1152,7 @@ def run_analyze(
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         payload["results_path"] = str(out_path)
 
-    _emit(progress, 100, "Analysis complete", None)
+    _emit(progress, 100, "Analysis complete", None, backend="local")
 
     payload["elapsed_sec"] = round(time.perf_counter() - t0, 2)
     return payload

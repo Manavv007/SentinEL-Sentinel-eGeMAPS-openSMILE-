@@ -7,15 +7,16 @@ from typing import Any
 
 import config
 
-BASE_CHANNELS = ("acoustic", "linguistic", "gaze", "lip")
+BASE_CHANNELS = ("acoustic", "linguistic", "specificity", "gaze", "lip")
 GPU_WEIGHT = 0.30
 NON_GPU_SCALE = 0.70
 
 BASE_WEIGHTS: dict[str, float] = {
-    "acoustic": config.WEIGHT_ACOUSTIC,
-    "linguistic": config.WEIGHT_LINGUISTIC,
-    "gaze": config.WEIGHT_GAZE,
-    "lip": config.WEIGHT_LIP,
+    "acoustic": config.WEIGHT_ACOUSTIC * (1.0 - config.WEIGHT_SPECIFICITY),
+    "linguistic": config.WEIGHT_LINGUISTIC * (1.0 - config.WEIGHT_SPECIFICITY),
+    "specificity": config.WEIGHT_SPECIFICITY,
+    "gaze": config.WEIGHT_GAZE * (1.0 - config.WEIGHT_SPECIFICITY),
+    "lip": config.WEIGHT_LIP * (1.0 - config.WEIGHT_SPECIFICITY),
 }
 
 

@@ -60,7 +60,7 @@ class MetricBaseline:
 
     def relative_deviation(self, value: float) -> float:
         """0 = at personal norm; higher = more unusual for this person."""
-        if not np.isfinite(value):
+        if self.n == 0 or not np.isfinite(value):
             return 0.0
         scale = max(self.mad, config.PERSONAL_BASELINE_MAD_FLOOR)
         z = abs(float(value) - self.median) / scale
@@ -149,9 +149,14 @@ class PersonalBaselineModel:
             self.ingest_feature_row(row, alpha=alpha)
         self.update_count += 1
 
+    def is_unseeded(self) -> bool:
+        """True when no metric has been observed yet (calibration not run or empty profile)."""
+        return all(m.n == 0 for m in self.metrics.values())
+
     def summary(self) -> dict[str, Any]:
         return {
             "source": self.source,
+            "unseeded": self.is_unseeded(),
             "update_count": self.update_count,
             "bootstrap_remaining": self.bootstrap_answers_remaining,
             "metrics": {

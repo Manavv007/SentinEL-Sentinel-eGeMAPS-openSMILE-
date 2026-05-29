@@ -80,12 +80,14 @@ class TemporalEvidenceTracker:
         ewma_before = self._ewma
 
         cog_spont = float(debug.get("cognitive_spontaneity", 0.0))
+        nat_samples = int(debug.get("natural_profile_samples", -1))
         level = classify_suspicion_level(
             contrastive_score=contrastive_score,
             script_similarity=script_similarity,
             naturality_score=naturality_score,
             natural_similarity=natural_similarity,
             cognitive_spontaneity=cog_spont,
+            natural_profile_samples=nat_samples,
         )
         evidence_units = nonlinear_level_contribution(
             level, contrastive_score, script_similarity
@@ -254,6 +256,9 @@ class TemporalEvidenceTracker:
                 "ling_gap_variance": float(w.debug.get("pause_metrics", {}).get("gap_variance", 0.0) or 0.0),
                 "ling_retrieval_pause_max": float(
                     w.debug.get("pause_metrics", {}).get("retrieval_pause_max", 0.0) or 0.0
+                ),
+                "natural_profile_samples": int(
+                    w.debug.get("natural_profile_samples", -1)
                 ),
             }
             for w in self._windows
@@ -448,11 +453,17 @@ class TemporalEvidenceTracker:
             **momentum_summary,
             "peak_ewma": self._peak_ewma,
         }
+        nat_samples = -1
+        if window_dicts:
+            nat_samples = int(window_dicts[0].get("natural_profile_samples", -1))
+        temporal_layer["natural_profile_samples"] = nat_samples
+
         behavioral = compute_answer_behavioral_metrics(
             window_dicts,
             horizon=horizon,
             momentum_summary=momentum_for_synthesis,
         )
+        behavioral["natural_profile_samples"] = nat_samples
         if config.ENABLE_COGNITIVE_SOURCING:
             from engine.cognitive_sourcing import enrich_behavioral_with_sourcing
 
@@ -544,13 +555,18 @@ class TemporalEvidenceTracker:
             self._ewma = value
             return
 
-        if level == SuspicionLevel.NONE or value <= 1e-9:
+        if value <= 1e-9:
             mult = self._momentum.decay_multiplier(
                 level=SuspicionLevel.NONE,
                 peak_ewma=self._peak_ewma,
                 is_benign=is_benign,
             )
             self._ewma *= mult
+            return
+
+        if level == SuspicionLevel.NONE:
+            alpha = config.EWMA_ALPHA_DECAY
+            self._ewma = alpha * value + (1.0 - alpha) * self._ewma
             return
 
         if is_benign and value <= self._ewma:

@@ -256,6 +256,13 @@ def synthesize_final_decision(
 
     momentum = float(behavioral.get("suspicion_momentum", 0))
     natural_saturation = float(behavioral.get("natural_similarity_saturation_ratio", 0))
+    nat_profile_samples = int(
+        temporal_summary.get("natural_profile_samples")
+        or behavioral.get("natural_profile_samples")
+        or -1
+    )
+    natural_profile_cold = nat_profile_samples == 0
+    cold_strong_min = config.COLD_START_PROBABLE_MIN_STRONG_WINDOWS
 
     promotion_gate = (
         streak >= config.PROBABLE_LONGEST_STREAK_MIN
@@ -269,7 +276,7 @@ def synthesize_final_decision(
     # --- Dominant scripted reading (Answer 4 target) ---
     scripted_dominant = (
         dom >= config.DOMINANT_SCRIPT_READING_THRESHOLD
-        and strong_n >= config.DOMINANT_MIN_STRONG_WINDOWS
+        and strong_n >= (cold_strong_min if natural_profile_cold else config.DOMINANT_MIN_STRONG_WINDOWS)
         and peak >= config.DOMINANT_MIN_PEAK_SUSPICION
         and recovery < config.DOMINANT_MAX_RECOVERY_STRENGTH
         and promotion_gate
@@ -278,7 +285,7 @@ def synthesize_final_decision(
 
     peak_authority = (
         peak >= config.PEAK_SUSPICION_AUTHORITY
-        and strong_n >= 2
+        and strong_n >= (cold_strong_min if natural_profile_cold else 2)
         and streak >= config.PROBABLE_LONGEST_STREAK_MIN
         and (peak_ewma >= margin or composite >= margin)
         and recovery < 0.55
@@ -292,6 +299,7 @@ def synthesize_final_decision(
         and peak >= config.SUSPICION_TIER_MODERATE
         and recovery < 0.5
         and promotion_gate
+        and not natural_profile_cold
     )
 
   # Guided preconstructed flow (scripted answers 2,4,6,7 target)
@@ -311,6 +319,7 @@ def synthesize_final_decision(
         and effort_flat >= 0.42
         and sem_cov <= config.SOURCING_PROTECTION_WEAKEN_COV_MAX + 0.08
         and not prepared_int_active
+        and (not natural_profile_cold or strong_n >= cold_strong_min)
     )
     if sourcing_external_dominant and (
         sem_decouple >= config.SEMANTIC_EFFORT_DECOUPLING_PROBABLE_MIN * 0.88
@@ -395,7 +404,9 @@ def synthesize_final_decision(
 
     if (scripted_dominant or peak_authority or density_authority) and (
         (guidance_dom >= config.GUIDANCE_DOMINANCE_MIN_PROBABLE and semantic_guidedness >= config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE)
-        or strong_n >= 3
+        or strong_n >= (cold_strong_min if natural_profile_cold else 3)
+    ) and (
+        not natural_profile_cold or strong_n >= cold_strong_min
     ) and (
         consensus_score >= config.GENERALIZATION_CONSENSUS_MIN_SCORE
         and consensus_active_signals >= config.GENERALIZATION_DIVERSITY_MIN_SIGNALS
@@ -551,6 +562,12 @@ def synthesize_final_decision(
 
     # Fall back to temporal layer but cap: high composite + peaks → at least AMBIGUOUS
     if temporal_status == "PROBABLE_SCRIPT_READING":
+        if natural_profile_cold and strong_n < cold_strong_min:
+            reasons.append(
+                f"NATURAL profile cold start: {strong_n} STRONG windows "
+                f"(need {cold_strong_min}) — preserving uncertainty"
+            )
+            return "AMBIGUOUS", "MEDIUM", reasons
         if (
             (guidance_dom < config.GUIDANCE_DOMINANCE_MIN_PROBABLE or semantic_guidedness < config.SEMANTIC_GUIDEDNESS_MIN_PROBABLE)
             and strong_n < 3

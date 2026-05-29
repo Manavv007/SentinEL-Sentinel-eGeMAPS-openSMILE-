@@ -9,6 +9,7 @@ from engine.feature_extraction import build_window_features
 from engine.naturality_scorer import NaturalityScorer
 from engine.profile_disentanglement import (
     adjust_script_similarity_for_disentanglement,
+    calibration_feature_row,
     compute_profile_similarity_bundle,
     filter_features_for_script_calibration,
     natural_metric_weights,
@@ -64,8 +65,76 @@ class ContrastiveEngine:
         *,
         transcripts: list[dict[str, Any]] | None = None,
         timeline: list[dict[str, Any]] | None = None,
+    ) -> tuple[BehavioralProfile, dict[str, Any]]:
+        """
+        Build SCRIPT_PROFILE from calibration video windows (intentional reading).
+        Returns (profile, build_diagnostics).
+        """
+        transcripts = transcripts or []
+        timeline = timeline or []
+        rows: list[dict[str, float]] = []
+        empty_rows = 0
+        acoustic_only_rows = 0
+        prev_pitch: float | None = None
+        total_windows = 0
+
+        for answer in calibration_answers:
+            tid = int(answer.get("answer_id", 0))
+            transcript = transcripts[tid] if tid < len(transcripts) else {}
+            a_start = float(answer.get("start_sec", 0))
+            a_end = float(answer.get("end_sec", a_start + 30))
+            for w in answer.get("windows", []):
+                total_windows += 1
+                start = float(w.get("window_start", 0))
+                end = start + 4.0
+                t_slice = _slice_timeline(timeline, start, end)
+                pitch = w.get("opensmile", {}).get("pitch_range_hz")
+                pitch_delta = None
+                if pitch is not None and prev_pitch is not None:
+                    pitch_delta = float(pitch) - prev_pitch
+                if pitch is not None:
+                    prev_pitch = float(pitch)
+                full = build_window_features(
+                    audio_window=w,
+                    transcript=transcript,
+                    timeline_slice=t_slice,
+                    pitch_delta=pitch_delta,
+                    answer_start_sec=a_start,
+                    answer_end_sec=a_end,
+                )
+                row = calibration_feature_row(full)
+                if not row:
+                    empty_rows += 1
+                    continue
+                if not any(k.startswith("cog_") for k in row):
+                    acoustic_only_rows += 1
+                rows.append(row)
+
+        self.script_profile = BehavioralProfile.empty("script")
+        self.script_profile.bulk_build(rows)
+
+        diagnostics = {
+            "calibration_answers": len(calibration_answers),
+            "calibration_windows_total": total_windows,
+            "feature_rows_built": len(rows),
+            "empty_feature_rows": empty_rows,
+            "acoustic_only_rows": acoustic_only_rows,
+            "sample_count": self.script_profile.sample_count,
+            "metric_keys": list(self.script_profile.metric_stats().keys()),
+        }
+        return self.script_profile, diagnostics
+
+    @staticmethod
+    def build_natural_seed_from_calibration(
+        calibration_answers: list[dict[str, Any]],
+        *,
+        transcripts: list[dict[str, Any]] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
     ) -> BehavioralProfile:
-        """Build SCRIPT_PROFILE from calibration video windows (intentional reading)."""
+        """
+        Voice/acoustic anchor for NATURAL profile — breaks cold-start deadlock.
+        Uses calibration acoustic + delivery features (not cognitive script patterns).
+        """
         transcripts = transcripts or []
         timeline = timeline or []
         rows: list[dict[str, float]] = []
@@ -86,22 +155,66 @@ class ContrastiveEngine:
                     pitch_delta = float(pitch) - prev_pitch
                 if pitch is not None:
                     prev_pitch = float(pitch)
-                rows.append(
-                    filter_features_for_script_calibration(
-                        build_window_features(
-                            audio_window=w,
-                            transcript=transcript,
-                            timeline_slice=t_slice,
-                            pitch_delta=pitch_delta,
-                            answer_start_sec=a_start,
-                            answer_end_sec=a_end,
-                        )
-                    )
+                full = build_window_features(
+                    audio_window=w,
+                    transcript=transcript,
+                    timeline_slice=t_slice,
+                    pitch_delta=pitch_delta,
+                    answer_start_sec=a_start,
+                    answer_end_sec=a_end,
                 )
+                row = {
+                    k: float(v)
+                    for k, v in full.items()
+                    if (k.startswith("acoustic_") or k.startswith("ling_"))
+                    and isinstance(v, (int, float))
+                }
+                if row:
+                    rows.append(row)
 
-        self.script_profile = BehavioralProfile.empty("script")
-        self.script_profile.bulk_build(rows)
-        return self.script_profile
+        seed = BehavioralProfile.empty("natural_seed")
+        seed.bulk_build(rows)
+        return seed
+
+    def seed_natural_profile(self, seed_profile: BehavioralProfile | dict[str, Any] | None) -> int:
+        """Load calibration NATURAL seed into interview store. Returns samples seeded."""
+        if seed_profile is None:
+            return 0
+        if isinstance(seed_profile, dict):
+            prof = BehavioralProfile.from_dict(seed_profile)
+        else:
+            prof = seed_profile
+        if prof.sample_count <= 0:
+            return 0
+        for key, samples in prof._samples.items():
+            for val in samples:
+                self._natural_store.profile.update({key: float(val)})
+        return self.natural_profile.sample_count
+
+    @staticmethod
+    def build_population_script_fallback(
+        acoustic_reading_profile: dict[str, dict[str, float]],
+    ) -> BehavioralProfile:
+        """Population-level SCRIPT prior when calibration behavioral profile is empty."""
+        profile = BehavioralProfile.empty("script_population")
+        key_map = {
+            "jitter_local": "acoustic_jitter_local",
+            "shimmer_local": "acoustic_shimmer_local",
+            "hnr": "acoustic_hnr",
+            "pitch_range_hz": "acoustic_pitch_range_hz",
+            "F0semitoneFrom27.5Hz_sma3nz_stddevNorm": "acoustic_F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
+            "MeanVoicedSegmentLengthSec": "acoustic_MeanVoicedSegmentLengthSec",
+            "MeanUnvoicedSegmentLength": "acoustic_MeanUnvoicedSegmentLength",
+        }
+        row: dict[str, float] = {}
+        for metric, stats in (acoustic_reading_profile or {}).items():
+            mean = stats.get("mean")
+            out_key = key_map.get(metric, f"acoustic_{metric}")
+            if mean is not None:
+                row[out_key] = float(mean)
+        if row:
+            profile.bulk_build([row, row, row])
+        return profile
 
     def reset_interview(self) -> None:
         """Start a new interview — NATURAL profile starts empty."""

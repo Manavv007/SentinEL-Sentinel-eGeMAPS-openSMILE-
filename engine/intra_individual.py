@@ -49,14 +49,23 @@ class IntraIndividualSession:
     ) -> dict[str, Any]:
         """Compute person-relative evidence for one answer."""
         window_rows = extract_answer_window_rows(answer, transcript, timeline)
-        rel_agg = self.baseline.answer_aggregate_relative(window_rows)
 
-        # Early interview bootstrap (first N answers refine baseline before strict deviation)
-        if self._early_bootstrap_count < config.PERSONAL_BASELINE_EARLY_ANSWERS:
+        # Seed baseline before deviation when empty or still in early bootstrap window
+        if (
+            window_rows
+            and (
+                self.baseline.is_unseeded()
+                or self._early_bootstrap_count < config.PERSONAL_BASELINE_EARLY_ANSWERS
+            )
+        ):
             self.baseline.ingest_window_rows(
                 window_rows, alpha=config.PERSONAL_BASELINE_BOOTSTRAP_ALPHA
             )
+            if self.baseline.is_unseeded():
+                self.baseline.source = "interview_bootstrap"
             self._early_bootstrap_count += 1
+
+        rel_agg = self.baseline.answer_aggregate_relative(window_rows)
 
         turb = intra_answer_turbulence_metrics(window_rows, self.baseline)
         cost = cognitive_cost_profile(
@@ -149,6 +158,19 @@ class IntraIndividualSession:
         elif intra_status == "PROBABLE_SCRIPT_READING" and contrastive_status != "CLEAR":
             final_status = intra_status
             final_conf = intra_conf
+        elif (
+            contrastive_status == "PROBABLE_SCRIPT_READING"
+            and intra_status == "AMBIGUOUS"
+            and float(intra_block.get("p_external_guidance", 0.5))
+            < config.SESSION_P_PROBABLE_MIN
+            and config.INTRA_INDIVIDUAL_PRESERVE_UNCERTAINTY
+        ):
+            final_status = "AMBIGUOUS"
+            final_conf = intra_conf
+            intra_reasons.append(
+                "intra-individual uncertainty preserved over contrastive promotion "
+                f"(P(external)={float(intra_block.get('p_external_guidance', 0)):.2f})"
+            )
         elif intra_status == "CLEAR" and contrastive_status == "PROBABLE_SCRIPT_READING":
             if config.INTRA_INDIVIDUAL_PRESERVE_UNCERTAINTY:
                 final_status = "AMBIGUOUS"
@@ -206,15 +228,19 @@ class IntraIndividualSession:
             },
         }
 
-        if config.INTRA_INDIVIDUAL_SESSION_REFINEMENT:
+        if config.INTRA_INDIVIDUAL_SESSION_REFINEMENT and not self.baseline.is_unseeded():
             p_final = self.probability.p_external
             for ans in results_answers:
                 intra = ans.get("intra_individual") or {}
                 p_ans = float(intra.get("p_external_guidance", p_final))
+                c = ans.get("contrastive") or {}
+                beh = c.get("behavioral_synthesis") or {}
+                strong_n = int(beh.get("strong_window_count", 0) or 0)
                 if (
                     p_final >= config.SESSION_P_PROBABLE_MIN
-                    and p_ans >= config.SESSION_P_PROBABLE_MIN * 0.9
-                    and ans.get("status") != "CLEAR"
+                    and p_ans >= config.SESSION_P_PROBABLE_MIN
+                    and strong_n >= 2
+                    and ans.get("status") not in ("CLEAR",)
                 ):
                     if ans.get("status") != "PROBABLE_SCRIPT_READING":
                         ans["status"] = "PROBABLE_SCRIPT_READING"

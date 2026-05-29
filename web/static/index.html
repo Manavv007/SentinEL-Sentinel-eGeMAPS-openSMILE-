@@ -63,7 +63,10 @@
         <button type="button" class="btn primary" id="btnAnalyze" disabled>Run analysis</button>
         <div class="job-box hidden" id="anJobBox">
           <div class="progress"><div class="progress-bar" id="anProgress"></div></div>
-          <p class="job-msg" id="anMsg"></p>
+          <div class="job-status-row">
+            <span class="runtime-badge hidden" id="anRuntimeBadge" aria-live="polite"></span>
+            <p class="job-msg" id="anMsg"></p>
+          </div>
           <p class="job-id">Job: <code id="anJobId"></code></p>
         </div>
       </div>

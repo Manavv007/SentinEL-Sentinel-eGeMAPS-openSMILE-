@@ -32,6 +32,7 @@ def classify_suspicion_level(
     naturality_score: float = 0.0,
     natural_similarity: float = 0.0,
     cognitive_spontaneity: float = 0.0,
+    natural_profile_samples: int = -1,
 ) -> SuspicionLevel:
     """
     Calibrated tiers — weak scores (0.17–0.23) must not equal strong (0.38+).
@@ -69,6 +70,17 @@ def classify_suspicion_level(
     ):
         base = SuspicionLevel.WEAK if base == SuspicionLevel.MODERATE else SuspicionLevel.NONE
 
+    # NATURAL profile cold start: do not treat weak-only script prior as suspicious
+    if natural_profile_samples == 0:
+        tier_boost = config.COLD_START_SUSPICION_TIER_BOOST
+        if c < config.SUSPICION_TIER_WEAK + tier_boost:
+            base = SuspicionLevel.NONE
+        elif (
+            base == SuspicionLevel.WEAK
+            and script < config.COLD_START_WEAK_SCRIPT_CEILING
+        ):
+            base = SuspicionLevel.NONE
+
     return base
 
 
@@ -94,14 +106,15 @@ def ewma_input_for_level(
     level: SuspicionLevel,
     contrastive_score: float,
 ) -> float:
-    """Asymmetric EWMA input — weak fades fast, strong persists."""
+    """Asymmetric EWMA input — tracks behavioral state on every window."""
+    c = float(max(0.0, contrastive_score))
     if level == SuspicionLevel.NONE:
-        return 0.0
+        return c * config.EWMA_BEHAVIORAL_TRACK_SCALE
     if level == SuspicionLevel.WEAK:
-        return contrastive_score * config.EWMA_WEAK_INPUT_SCALE
+        return c * config.EWMA_WEAK_INPUT_SCALE
     if level == SuspicionLevel.MODERATE:
-        return contrastive_score * config.EWMA_MODERATE_INPUT_SCALE
-    return contrastive_score * config.EWMA_STRONG_INPUT_SCALE
+        return c * config.EWMA_MODERATE_INPUT_SCALE
+    return c * config.EWMA_STRONG_INPUT_SCALE
 
 
 def aggregate_answer_evidence(

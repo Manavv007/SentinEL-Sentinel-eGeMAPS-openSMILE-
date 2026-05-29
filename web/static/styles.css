@@ -151,8 +151,73 @@ h3 { font-size: 0.95rem; margin: 1rem 0 0.5rem; color: var(--muted); }
 }
 
 .job-box { margin-top: 1rem; }
-.job-msg { font-size: 0.9rem; color: var(--muted); }
+.job-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.35rem 0;
+}
+.job-msg { font-size: 0.9rem; color: var(--muted); margin: 0; flex: 1; min-width: 12rem; }
 .job-id code { font-size: 0.75rem; color: var(--accent); }
+
+.runtime-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.runtime-badge.tag-kaggle {
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+}
+.runtime-badge.tag-local {
+  background: rgba(52, 211, 153, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+.runtime-badge.tag-hybrid {
+  background: rgba(56, 189, 248, 0.15);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+.job-msg .runtime-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+.job-msg .runtime-tag.tag-kaggle {
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+}
+.job-msg .runtime-tag.tag-local {
+  background: rgba(52, 211, 153, 0.15);
+  color: #6ee7b7;
+}
+.job-msg .runtime-tag.tag-hybrid {
+  background: rgba(56, 189, 248, 0.15);
+  color: #7dd3fc;
+}
+.log-entry .runtime-tag {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  margin-right: 0.25rem;
+}
+.log-entry .runtime-tag.tag-kaggle { color: #c4b5fd; background: rgba(167, 139, 250, 0.15); }
+.log-entry .runtime-tag.tag-local { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); }
+.log-entry .runtime-tag.tag-hybrid { color: #7dd3fc; background: rgba(56, 189, 248, 0.12); }
 
 .summary-row {
   display: grid;
