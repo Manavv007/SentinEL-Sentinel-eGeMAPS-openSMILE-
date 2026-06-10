@@ -2,6 +2,11 @@
 Interview speaker diarization helpers — pick human candidate vs AI interviewer.
 
 Centralizes logic used by local AudioProcessor and (mirrored in) Kaggle notebook.
+
+AI-interviewer interviews (e.g. Saren / PostHog-style bots):
+  - AI opens with a long intro (first speaker)
+  - AI asks questions; human gives longer answers
+  - ``most_speech`` and total-duration heuristics often pick the AI — avoid them in ``auto``.
 """
 
 from __future__ import annotations
@@ -12,9 +17,10 @@ from typing import Any
 
 import config
 
-# Turns shorter than this on the candidate track are usually mis-labeled AI prompts.
 MIN_CANDIDATE_SEGMENT_SEC: float = getattr(config, "MIN_CANDIDATE_SEGMENT_SEC", 4.0)
 AI_SHORT_TURN_SEC: float = getattr(config, "AI_SHORT_TURN_SEC", 2.5)
+# Gaps under this between same-speaker segments are merged into one turn
+TURN_MERGE_GAP_SEC: float = getattr(config, "TURN_MERGE_GAP_SEC", 0.35)
 
 
 def extract_segments_from_diarization(diarization_output: Any) -> list[tuple[float, float, str]]:
@@ -57,6 +63,26 @@ def turn_lengths_for_speaker(
     return out
 
 
+def merge_consecutive_turns(
+    segments: list[tuple[float, float, str]],
+    *,
+    merge_gap_sec: float | None = None,
+) -> list[tuple[float, float, str]]:
+    """Merge adjacent same-speaker segments into dialogue turns."""
+    gap = float(merge_gap_sec if merge_gap_sec is not None else TURN_MERGE_GAP_SEC)
+    if not segments:
+        return []
+    ordered = sorted(segments, key=lambda x: x[0])
+    merged: list[tuple[float, float, str]] = [ordered[0]]
+    for start, end, spk in ordered[1:]:
+        ps, pe, pspk = merged[-1]
+        if spk == pspk and start - pe <= gap:
+            merged[-1] = (ps, max(pe, end), spk)
+        else:
+            merged.append((start, end, spk))
+    return merged
+
+
 def filter_candidate_segments(
     segments: list[tuple[float, float, str]],
     candidate: str,
@@ -66,16 +92,50 @@ def filter_candidate_segments(
     """Keep only candidate speech; drop short blips (AI questions mis-labeled)."""
     min_dur = float(min_duration_sec if min_duration_sec is not None else MIN_CANDIDATE_SEGMENT_SEC)
     kept: list[tuple[float, float]] = []
-    dropped = 0
     for start, end, spk in segments:
         if spk != candidate:
             continue
         dur = max(0.0, end - start)
         if dur >= min_dur:
             kept.append((start, end))
-        else:
-            dropped += 1
     return kept
+
+
+def _pick_responder_speaker(segments: list[tuple[float, float, str]]) -> str | None:
+    """
+    In Q&A, the candidate usually speaks *after* the other speaker (answers questions).
+    """
+    turns = merge_consecutive_turns(segments)
+    follow_after_other: dict[str, int] = defaultdict(int)
+    for i in range(1, len(turns)):
+        _, _, prev = turns[i - 1]
+        _, _, curr = turns[i]
+        if prev != curr:
+            follow_after_other[curr] += 1
+    if not follow_after_other:
+        return None
+    return max(follow_after_other, key=follow_after_other.get)
+
+
+def _pick_not_opener_speaker(segments: list[tuple[float, float, str]]) -> str | None:
+    """AI interviewers typically open the session (intro + first question)."""
+    turns = merge_consecutive_turns(segments)
+    if not turns:
+        return None
+    opener = turns[0][2]
+    speakers = {spk for _, _, spk in segments}
+    if len(speakers) != 2:
+        return None
+    others = [s for s in speakers if s != opener]
+    return others[0] if others else None
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, int(round((pct / 100.0) * (len(ordered) - 1)))))
+    return float(ordered[idx])
 
 
 def select_candidate_speaker(
@@ -86,19 +146,24 @@ def select_candidate_speaker(
     Pick which diarization label is the human candidate (not AI interviewer).
 
     Strategies:
-      most_speech   — legacy default; works when candidate talks more overall
+      most_speech   — legacy; often wrong when AI intro + many questions dominate time
       least_speech  — when AI interviewer dominates talk time
       longest_turns — when AI asks short prompts and candidate gives long answers
-      auto          — vote across heuristics + composite (recommended for 2-speaker)
+      responder     — speaker who most often talks after the other (Q&A pattern)
+      auto          — AI-interview-aware voting (recommended for 2-speaker bots)
     """
     totals = speaker_total_durations(segments)
-    strategy = (strategy or config.CANDIDATE_SPEAKER or "most_speech").lower()
+    strategy = (strategy or config.CANDIDATE_SPEAKER or "auto").lower()
 
     if not totals:
         return "SPEAKER_00", {"strategy": strategy, "reason": "no_segments"}
 
     if strategy == "auto":
         return _select_auto(segments, totals)
+
+    if strategy == "responder":
+        candidate = _pick_responder_speaker(segments) or _pick_longest_turns(segments, totals)
+        return candidate, _selection_meta(strategy, candidate, totals, segments)
 
     if strategy == "least_speech":
         candidate = min(totals, key=totals.get)
@@ -120,10 +185,19 @@ def _pick_longest_turns(
     min_turn = config.CANDIDATE_TURN_MIN_SEC
     scores: dict[str, float] = {}
     for speaker in totals:
-        lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=min_turn)
-        if not lengths:
-            lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)
-        scores[speaker] = float(statistics.median(lengths)) if lengths else 0.0
+        merged = [
+            max(0.0, e - s)
+            for s, e, spk in merge_consecutive_turns(segments)
+            if spk == speaker
+        ]
+        if not merged:
+            merged = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)
+        lengths = [d for d in merged if d >= min_turn] or merged
+        # Prefer p90 — sustained answers vs short AI question bursts
+        scores[speaker] = max(
+            float(statistics.median(lengths)) if lengths else 0.0,
+            _percentile(lengths, 90),
+        )
     return max(scores, key=scores.get)
 
 
@@ -131,33 +205,46 @@ def _select_auto(
     segments: list[tuple[float, float, str]],
     totals: dict[str, float],
 ) -> tuple[str, dict[str, Any]]:
-    """Robust 2-speaker pick: vote + composite score."""
+    """
+    AI-interview-aware 2-speaker pick.
+
+    Does NOT vote for ``most_speech`` — that label frequently selects the bot.
+    """
     speakers = list(totals.keys())
     if len(speakers) == 1:
         return speakers[0], _selection_meta("auto", speakers[0], totals, segments)
 
     votes: dict[str, int] = defaultdict(int)
-    most = max(totals, key=totals.get)
-    least = min(totals, key=totals.get)
+    responder = _pick_responder_speaker(segments)
+    not_opener = _pick_not_opener_speaker(segments)
     longest = _pick_longest_turns(segments, totals)
-    votes[most] += 1
-    votes[least] += 1
-    votes[longest] += 1
-
+    least = min(totals, key=totals.get)
     composite = _pick_composite(segments, totals)
-    votes[composite] += 2  # stronger weight on structure-based score
 
-    # Winner by votes; tie-break with composite
+    if responder:
+        votes[responder] += 4
+    if not_opener:
+        votes[not_opener] += 3
+    votes[longest] += 3
+    votes[least] += 1
+    votes[composite] += 2
+
     max_votes = max(votes.values())
     winners = [spk for spk, v in votes.items() if v == max_votes]
     if len(winners) == 1:
         candidate = winners[0]
+    elif responder and responder in winners:
+        candidate = responder
+    elif longest in winners:
+        candidate = longest
     else:
         candidate = composite
 
     meta = _selection_meta("auto", candidate, totals, segments)
     meta["votes"] = dict(votes)
     meta["composite_pick"] = composite
+    meta["responder_pick"] = responder
+    meta["not_opener_pick"] = not_opener
     meta["vote_winners"] = winners
     return candidate, meta
 
@@ -167,17 +254,25 @@ def _pick_composite(
     totals: dict[str, float],
 ) -> str:
     """
-    Candidate likely has longer median turns, more long turns, fewer short AI blips.
+    Candidate likely has longer sustained turns and fewer short AI-style blips.
+    Total talk time is de-emphasized (AI often wins on duration alone).
     """
     metrics: dict[str, dict[str, float]] = {}
     for speaker in totals:
-        lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)
+        lengths = [
+            max(0.0, e - s)
+            for s, e, spk in merge_consecutive_turns(segments)
+            if spk == speaker
+        ]
+        if not lengths:
+            lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)
         if not lengths:
             lengths = [0.0]
         short_n = sum(1 for d in lengths if d < AI_SHORT_TURN_SEC)
-        long_n = sum(1 for d in lengths if d >= 5.0)
+        long_n = sum(1 for d in lengths if d >= 8.0)
         metrics[speaker] = {
             "median_turn": float(statistics.median(lengths)),
+            "p90_turn": _percentile(lengths, 90),
             "total_sec": totals[speaker],
             "short_frac": short_n / len(lengths),
             "long_count": float(long_n),
@@ -185,16 +280,16 @@ def _pick_composite(
         }
 
     max_median = max(m["median_turn"] for m in metrics.values()) or 1.0
-    max_total = max(m["total_sec"] for m in metrics.values()) or 1.0
+    max_p90 = max(m["p90_turn"] for m in metrics.values()) or 1.0
     max_long = max(m["long_count"] for m in metrics.values()) or 1.0
 
     def score(speaker: str) -> float:
         m = metrics[speaker]
         return (
-            0.40 * (m["median_turn"] / max_median)
-            + 0.25 * (m["total_sec"] / max_total)
-            + 0.20 * (m["long_count"] / max_long)
-            - 0.35 * m["short_frac"]
+            0.35 * (m["median_turn"] / max_median)
+            + 0.35 * (m["p90_turn"] / max_p90)
+            + 0.25 * (m["long_count"] / max_long)
+            - 0.40 * m["short_frac"]
         )
 
     return max(metrics.keys(), key=score)
@@ -209,9 +304,13 @@ def _selection_meta(
     min_turn = config.CANDIDATE_TURN_MIN_SEC
     turn_scores: dict[str, float] = {}
     for speaker in totals:
-        lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=min_turn)
+        lengths = [
+            max(0.0, e - s)
+            for s, e, spk in merge_consecutive_turns(segments)
+            if spk == speaker
+        ]
         if not lengths:
-            lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)
+            lengths = turn_lengths_for_speaker(segments, speaker, min_turn_sec=min_turn)
         turn_scores[speaker] = round(
             float(statistics.median(lengths)) if lengths else 0.0, 2
         )

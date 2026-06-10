@@ -632,11 +632,16 @@ KAGGLE_OFFLOAD: bool = _get_bool("KAGGLE_OFFLOAD", bool(KAGGLE_GPU_URL))
 KAGGLE_OFFLOAD_TRANSCRIPTION: bool = _get_bool("KAGGLE_OFFLOAD_TRANSCRIPTION", True)
 KAGGLE_PARALLEL_ANSWERS: int = max(1, int(_get_float("KAGGLE_PARALLEL_ANSWERS", 4)))
 SKIP_LOCAL_WHISPER_WHEN_KAGGLE: bool = _get_bool("SKIP_LOCAL_WHISPER_WHEN_KAGGLE", True)
-# Local pyannote diarization is more reliable for AI vs candidate — default off.
-KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool("KAGGLE_OFFLOAD_SEGMENTATION", False)
-KAGGLE_SEGMENT_TIMEOUT_SEC: int = int(_get_float("KAGGLE_SEGMENT_TIMEOUT_SEC", 900))
-# fast = Silero VAD + long-turn filter (~10–30s); pyannote = accurate but slow (minutes)
+# fast = Silero VAD + long-turn filter (~10–30s); pyannote = accurate but slow on CPU.
 KAGGLE_SEGMENT_MODE: str = _get_str("KAGGLE_SEGMENT_MODE", "pyannote").lower()
+# pyannote GPU segmentation uses the SAME diarization model + identical candidate-
+# selection logic as local, so offloading it preserves accuracy while removing the
+# slow local CPU diarization (~minutes). Auto-falls back to local if Kaggle is down.
+# Only the fast VAD mode is less reliable, so it stays opt-in.
+KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool(
+    "KAGGLE_OFFLOAD_SEGMENTATION", KAGGLE_OFFLOAD and KAGGLE_SEGMENT_MODE == "pyannote"
+)
+KAGGLE_SEGMENT_TIMEOUT_SEC: int = int(_get_float("KAGGLE_SEGMENT_TIMEOUT_SEC", 900))
 KAGGLE_FAST_MIN_CANDIDATE_SEC: float = _get_float("KAGGLE_FAST_MIN_CANDIDATE_SEC", 3.0)
 KAGGLE_SKIP_ALIGN_INTERVIEW: bool = _get_bool("KAGGLE_SKIP_ALIGN_INTERVIEW", True)
 # When true, prefetch uses /transcribe_answer only (faster than /analyze_batch per answer)
@@ -652,7 +657,13 @@ AUDIO_WINDOW_PARALLEL_WORKERS: int = max(
 # longest_turns — longer median turns (can mis-pick if candidate gives short answers)
 # auto          — vote + composite (recommended)
 _CANDIDATE_SPEAKER_RAW = _get_str("CANDIDATE_SPEAKER", "auto").lower()
-if _CANDIDATE_SPEAKER_RAW not in ("most_speech", "least_speech", "longest_turns", "auto"):
+if _CANDIDATE_SPEAKER_RAW not in (
+    "most_speech",
+    "least_speech",
+    "longest_turns",
+    "responder",
+    "auto",
+):
     _CANDIDATE_SPEAKER_RAW = "auto"
 CANDIDATE_SPEAKER: str = _CANDIDATE_SPEAKER_RAW
 

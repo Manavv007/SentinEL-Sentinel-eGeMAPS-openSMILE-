@@ -32,29 +32,29 @@ class TransitionDetector:
         cur = features
         signals: list[float] = []
 
-        # Filler disappearance
+        # Filler disappearance - made more conservative
         prev_fill = prev.get("ling_filler_rate_per_30s", 0.0)
         cur_fill = cur.get("ling_filler_rate_per_30s", 0.0)
-        if prev_fill > 1.0 and cur_fill < 0.5:
+        if prev_fill > 3.0 and cur_fill < 0.2:
             signals.append(min(1.0, (prev_fill - cur_fill) / max(prev_fill, 1e-6)))
 
-        # Pause entropy collapse (rhythmic reading)
+        # Pause entropy collapse (rhythmic reading) - made more conservative
         prev_ent = prev.get("ling_pause_entropy", 0.0)
         cur_ent = cur.get("ling_pause_entropy", 0.0)
-        if prev_ent > 0.3 and cur_ent < prev_ent * 0.5:
+        if prev_ent > 0.7 and cur_ent < prev_ent * 0.2:
             signals.append(min(1.0, (prev_ent - cur_ent) / max(prev_ent, 1e-6)))
 
-        # Lip aperture stabilization
+        # Lip aperture stabilization - made more conservative and reduced weight
         prev_lip = prev.get("video_lip_aperture_std", 0.0)
         cur_lip = cur.get("video_lip_aperture_std", 0.0)
-        if prev_lip > 0.02 and cur_lip < prev_lip * 0.5:
-            signals.append(0.7)
+        if prev_lip > 0.08 and cur_lip < prev_lip * 0.2:
+            signals.append(0.3)  # Further reduced from 0.4
 
-        # Pitch dynamics flattening
+        # Pitch dynamics flattening - made more conservative and reduced weight
         prev_pitch = prev.get("acoustic_pitch_range_hz", 0.0)
         cur_pitch = cur.get("acoustic_pitch_range_hz", 0.0)
-        if prev_pitch > 50 and cur_pitch < prev_pitch * 0.6:
-            signals.append(0.6)
+        if prev_pitch > 150 and cur_pitch < prev_pitch * 0.4:
+            signals.append(0.2)  # Further reduced from 0.3
 
         self._prev_features = dict(features)
         score = float(np.mean(signals)) if signals else 0.0

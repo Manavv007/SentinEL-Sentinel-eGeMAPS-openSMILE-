@@ -712,8 +712,10 @@ def apply_session_sourcing_refinement(
             )
 
         # Soften over-promotion when session strongly favors internal generation
+        # (but never soften a memorized technical-script signal — person-independent).
         if (
             new_status == "PROBABLE_SCRIPT_READING"
+            and mem_tech < config.MEMORIZED_TECHNICAL_PROBABLE_MIN
             and session_int >= config.SESSION_INTERNAL_LIKELIHOOD_CLEAR_MIN
             and session_ext < config.SESSION_EXTERNAL_LIKELIHOOD_AMBIGUOUS_MIN
             and soft < config.SOURCING_SOFT_EVIDENCE_MIN

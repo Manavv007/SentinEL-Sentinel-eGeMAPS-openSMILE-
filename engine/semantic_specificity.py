@@ -134,6 +134,19 @@ _TECH_PROPER = re.compile(
     re.IGNORECASE,
 )
 
+# Generic systems/architecture concept vocabulary. A dense enumeration of these with
+# no personal narrative or specifics signals memorized/textbook technical prose
+# (e.g. "We implemented microservices ... authentication, real-time communication ...").
+_TECH_CONCEPT_TERMS = re.compile(
+    r"\b(microservices?|monolith\w*|scalab\w+|latency|throughput|load[ -]?balanc\w*|"
+    r"fault[ -]?toleran\w*|high availability|authentication|authorization|real-?time|"
+    r"asynchronous|synchronous|persistent|stateless|full[ -]?duplex|half[ -]?duplex|"
+    r"broadcast|distributed|concurren\w+|middleware|caching|in-memory|encryption|"
+    r"websockets?|rest api|api gateway|message queue|pub[ -]?sub|independent services?|"
+    r"event[ -]?driven|orchestrat\w+|containeriz\w+|incident management|media handling)\b",
+    re.IGNORECASE,
+)
+
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[A-Za-z0-9']+", text or "")
@@ -198,6 +211,8 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
 
     tech_def_hits = sum(1 for p in _TECH_DEFINITION_PHRASES if p in text_lower)
     tech_proper_hits = len(_TECH_PROPER.findall(text))
+    tech_concept_hits = len(_TECH_CONCEPT_TERMS.findall(text))
+    tech_concept_density = min(1.0, tech_concept_hits / max(n_words / 12.0, 1.0))
     definitional_passive = len(_DEFINitional_PASSIVE.findall(text))
     personal_narrative_hits = len(_PERSONAL_NARRATIVE.findall(text))
     personal_project_hits = len(_PERSONAL_PROJECT_ANCHOR.findall(text))
@@ -208,6 +223,12 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         + (0.25 if "I have been" in text or "I use" in text else 0.0),
     )
 
+    # Dense generic-tech enumeration without personal narrative = memorized technical
+    # script (catches first-person-framed recitations like "We implemented microservices
+    # by separating ... authentication, real-time communication ..." that carry no
+    # personal specifics). Self-suppresses for genuine personal answers.
+    tech_enumeration_term = tech_concept_density * (1.0 - personal_narrative_score)
+
     memorized_technical_script_score = max(
         0.0,
         min(
@@ -216,7 +237,8 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
             + min(1.0, tech_proper_hits / 3.0) * 0.28
             + definitional_passive * 0.15
             + (1.0 - min(1.0, personal_project_hits / 1.5)) * 0.20
-            + (1.0 - personal_narrative_score) * 0.15,
+            + (1.0 - personal_narrative_score) * 0.15
+            + tech_enumeration_term * 0.30,
         ),
     )
     # Penalize genuine personal workflow answers ("I use Instagram metrics...")
@@ -281,6 +303,7 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         "personal_narrative_score": round(personal_narrative_score, 4),
         "memorized_technical_script_score": round(memorized_technical_script_score, 4),
         "tech_definition_hits": tech_def_hits,
+        "technical_concept_density": round(tech_concept_density, 4),
         "word_count": n_words,
         "reasons": reasons,
     }

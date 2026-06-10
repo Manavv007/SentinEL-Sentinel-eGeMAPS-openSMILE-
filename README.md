@@ -1,220 +1,249 @@
-# SentinEL
+# SentinEL 🛡️
 
-Multi-modal interview integrity analysis: acoustic, linguistic, gaze, and lip signals are fused to flag probable script reading during answers.
+SentinEL is a state-of-the-art **multi-modal interview integrity analysis engine**. By fusing acoustic, linguistic, cognitive, and (optionally) visual signals, SentinEL identifies behavioral anomalies to flag probable script-reading and memorized delivery during remote interviews.
 
-## Installation (Local CPU Mode)
+Rather than relying on generic rules, SentinEL uses a **dual-profile contrastive design** that calibrates specifically to the candidate's unique voice and speech patterns, ensuring high-accuracy detection while minimizing false positives for honest but nervous candidates.
 
-### Requirements
+---
 
-- Python 3.10 (not 3.11+, not 3.9)
-- ffmpeg:
-  - Windows: https://www.gyan.dev/ffmpeg/builds/ → add to PATH
-  - Mac: `brew install ffmpeg`
-  - Linux: `sudo apt install ffmpeg`
+## 🚀 Key Features
 
-### Install dependencies (ORDER MATTERS)
+*   **Dual-Profile Contrastive Engine (v5)**: Learns a candidate's reading style during a quick calibration step (**SCRIPT profile**), and dynamically extracts their spontaneous speech style (**NATURAL profile**) during the interview.
+*   **Intra-Individual Behavioral Modeling**: Compares the candidate's active delivery against their own calibrated baseline (voice quality, pitch variability, micro-level turbulence) instead of generic population averages.
+*   **Cognitive Sourcing Inference**: Analyzes speech timing, pause entropy, and semantic-effort covariance to classify whether answers are internally generated (authentic recalling) vs. externally sourced (script reading/listening).
+*   **Semantic Specificity Layer**: Uses rule-based NLP to detect essay-like textbook descriptions (e.g., memorized AWS architecture definitions) while protecting personal narrative responses (e.g., "In my previous role, I resolved...").
+*   **Performance Optimized**: Features process-wide model caching, parallel window extraction, and asynchronous local/remote execution.
+*   **Web Dashboard & CLI**: Start jobs, monitor progress, and review timelines and decision trees via the interactive web client or terminal interface.
 
-**Step 1 — CPU-only PyTorch** (saves ~2GB vs CUDA version):
+---
 
+## 📐 High-Level Architecture & Signal Flow
+
+```
+                  ┌──────────────────────────────────────────┐
+                  │          VIDEO / AUDIO INPUT             │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │    Audio Extraction & Preprocessing      │
+                  │             (16 kHz Mono)                │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │      Diarization (pyannote.audio)        │
+                  │    Isolates candidate speaker turns      │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │      Segmentation into Answer Turns      │
+                  └──────────┬────────────────────┬──────────┘
+                             │                    │
+                             ▼                    ▼
+                ┌────────────────────────┐    ┌────────────────────────┐
+                │    4s Window Slices    │    │   WhisperX ASR (CPU)   │
+                │     (2s hop interval)  │    │   or Kaggle GPU Tunnel │
+                └────────────┬───────────┘    └───────────┬────────────┘
+                             │                            │
+                             ▼                            ▼
+                ┌────────────────────────┐    ┌────────────────────────┐
+                │   Acoustic features    │    │  Linguistic features   │
+                │ (openSMILE/Parselmouth)│    │ (WPS, Pause Entropy)   │
+                └────────────┬───────────┘    └───────────┬────────────┘
+                             │                            │
+                             └─────────────┬──────────────┘
+                                           │
+                                           ▼
+                  ┌──────────────────────────────────────────┐
+                  │       Dual-Profile Contrastive Scorer    │
+                  │        (SCRIPT vs. NATURAL memory)       │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │    8-Layer Decision & Aggregation Hub    │
+                  │   Fuses signals and applies thresholds   │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │         EXPLAINABLE FINAL VERDICT        │
+                  │   CLEAR / AMBIGUOUS / PROBABLE SCRIPT    │
+                  └──────────────────────────────────────────┘
+```
+
+### The 8 Scoring Layers
+
+SentinEL evaluates integrity through successive filters rather than a single formula:
+1.  **Window-Level Contrastive Tiers**: Computes `script_similarity - natural_similarity` per 4s window.
+2.  **Answer-Level Behavioral Synthesis**: Evaluates streak persistence, density, and cognitive spontaneity index per answer turn.
+3.  **Cognitive Sourcing Inference**: Determines likelihood of external reading vs. internal recall.
+4.  **Fused Multi-Channel Scorer**: Aggregates normalized acoustic, linguistic, specificity, and optional GPU channels.
+5.  **Intra-Individual Session Drift**: Adjusts criteria relative to candidate baseline deviations and session-level voice drift.
+6.  **Semantic Specificity Filter**: Demotes scores for conversational/personal narrative; promotes for generic textbook jargon.
+7.  **Session-Level Sourcing Aggregation**: Refines per-answer probabilities based on whole-interview consistency.
+8.  **Final Semantic Authority Pass**: Protects narrative-rich answers from session-level downgrades.
+
+---
+
+## 🛠️ Installation & Setup (Local CPU Mode)
+
+SentinEL runs locally on CPU by default. 
+
+### Prerequisites
+
+*   **Python 3.10** (Required. Do not use 3.9 or 3.11+).
+*   **FFmpeg**: Must be installed and added to your system `PATH`.
+    *   **Windows**: Download builds from [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+    *   **macOS**: `brew install ffmpeg`
+    *   **Linux**: `sudo apt install ffmpeg`
+
+### Step 1: Install PyTorch (CPU-Optimized)
+Installing the CPU-specific wheel saves ~2GB of space and avoids CUDA library version mismatches.
 ```bash
 pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 ```
 
-**Step 2 — WhisperX:**
-
+### Step 2: Install WhisperX
 ```bash
 pip install whisperx==3.1.5
 ```
 
-**Step 3 — Everything else:**
-
+### Step 3: Install Remaining Requirements
 ```bash
 pip install -r requirements.txt
 ```
 
-### First-time setup
+### Step 4: Environment Variables & HuggingFace Models
+SentinEL uses **pyannote.audio** for speaker segmentation, which requires agreeing to user terms.
 
-1. Copy `.env.example` to `.env` and add your HuggingFace token  
-   (required once — downloads pyannote model weights on first run, then cached locally)
+1.  Copy [`.env.example`](file:///c:/Users/Manav/Downloads/openHands2/.env.example) to Create a new file [`.env`](file:///c:/Users/Manav/Downloads/openHands2/.env):
+    ```bash
+    cp .env.example .env
+    ```
+2.  Add your HuggingFace User Token (`HF_TOKEN`) inside your [`.env`](file:///c:/Users/Manav/Downloads/openHands2/.env).
+3.  Accept the user terms on HuggingFace for these three repositories:
+    *   [Speaker Diarization 3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+    *   [Segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0)
+    *   [WeSpeaker VoxCeleb ResNet34 LM](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM)
 
-2. Accept pyannote model terms on HuggingFace (one-time, required):
-   - https://huggingface.co/pyannote/speaker-diarization-3.1
-   - https://huggingface.co/pyannote/segmentation-3.0
-   - https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
+---
 
-### Run
+## 💻 How to Run
 
-**Calibrate** (reading paragraph video):
+SentinEL has a modular command-line interface as well as an interactive web app.
 
+### Command Line Interface (CLI)
+
+#### 1. Calibrate (SCRIPT Profile Generation)
+Run calibration on a short (30–60 second) video of the candidate reading a paragraph aloud.
 ```bash
-python main.py calibrate --video caliberation_file/pre-train-demo.mp4
+python main.py calibrate --video caliberation_file/pre-train-demo.mp4 --output calibration_profile.json
 ```
 
-**Analyze** (interview video):
-
+#### 2. Analyze (Interview Recording Analysis)
+Analyze the actual interview video against the generated calibration profile.
 ```bash
-python main.py analyze --video interview_files/demo-8.webm --calibration calibration_profile.json
+python main.py analyze --video interview_files/demo-8.webm --calibration calibration_profile.json --output results.json
 ```
 
-**Report:**
-
+#### 3. Report (Human-Readable Summary)
+Summarize and print the findings from `results.json` directly to the terminal.
 ```bash
 python main.py report --results results.json
 ```
 
-### Web UI (recommended)
+---
 
-Upload calibration and interview videos in the browser, watch progress, and explore charts + decision logs.
+### Web Dashboard (Recommended)
 
-```powershell
-pip install fastapi uvicorn python-multipart
-.\run_web.ps1
-```
+SentinEL includes an interactive FastAPI-based web frontend to upload videos, view live processing logs, check candidate timeline charts, and drill down into per-answer decision logs.
 
-**Important:** Always start the UI with `.\run_web.ps1` — do **not** use `python -m uvicorn` directly unless that same Python has `whisperx` installed. The launcher auto-picks a Python where `whisperx` imports successfully.
+1.  Ensure you have web dependencies:
+    ```bash
+    pip install fastapi uvicorn python-multipart
+    ```
+2.  Launch the web server using the helper script:
+    *   **Windows**: Run [run_web.ps1](file:///c:/Users/Manav/Downloads/openHands2/run_web.ps1) or [restart_web.ps1](file:///c:/Users/Manav/Downloads/openHands2/restart_web.ps1) in PowerShell.
+    *   **macOS / Linux**: `uvicorn web.app:app --host 127.0.0.1 --port 8765`
+3.  Open **[http://127.0.0.1:8765](http://127.0.0.1:8765)** in your browser.
 
-Open **http://127.0.0.1:8765**
+> [!IMPORTANT]
+> Always launch the web server via `.\run_web.ps1` (or using the exact Python executable where `whisperx` is installed) to avoid import errors.
 
-1. **Calibrate** — upload reading video → builds SCRIPT profile  
-2. **Analyze** — upload interview + pick calibration job (or upload `.json`)  
-3. **Results** — timeline chart, per-answer scores, full decision log with every metric
+---
 
-### Faster calibration (30s video)
+## ☁️ Optional: Kaggle GPU Offload
 
-With default **fast calibration** (see `.env.example`), a 30s reading clip is typically **~20–40 seconds** instead of ~2 minutes:
+If you want faster transcription or wish to run Whisper `large-v3` without overloading your local CPU, you can offload transcription and feature extraction to a Kaggle GPU instance.
 
-| Optimization | Effect |
-|--------------|--------|
-| Skip pyannote diarization | Single-speaker reading — no speaker-ID model |
-| Whisper `tiny` for calibration | Faster ASR; interview still uses `WHISPER_MODEL_SIZE` |
-| Skip word alignment on calibrate | Saves wav2vec pass |
-| Video at 5 fps | Fewer face-mesh frames |
-| Parallel audio + video | Both run at once |
-| Model preload on web start | First job skips cold Whisper load |
+### Step 1: Start the Remote Server
+1.  Upload [kaggle_gpu_server.ipynb](file:///c:/Users/Manav/Downloads/openHands2/kaggle_gpu_server.ipynb) to Kaggle (or create a new notebook with its cells).
+2.  Enable GPU (T4 x2 or P100 recommended).
+3.  Add `HF_TOKEN` and `NGROK_AUTHTOKEN` as Secrets in your Kaggle notebook settings.
+4.  Run Cell 1 (installing dependencies) -> Restart Session -> Run Cell 2 (launches the server and ngrok tunnel).
+5.  Copy the printed public ngrok URL (e.g., `https://xxxx.ngrok-free.dev`).
 
-Set `FAST_CALIBRATION=false` in `.env` for maximum calibration quality (slower).
-
-### Expected processing times (CPU, small int8 model)
-
-| Step              | Time for 1hr interview |
-|-------------------|------------------------|
-| Video (MediaPipe) | ~2 min                 |
-| Diarization       | ~3 min                 |
-| Transcription     | ~4 min (all answers)   |
-| Acoustics         | ~1 min                 |
-| Scoring           | <1 sec                 |
-| **Total**         | **~10 min**            |
-
-### Optional: filler-preserving fallback
-
-If WhisperX strips `um`/`uh`, install:
-
-```bash
-pip install whisper-timestamped
-```
-
-### Optional: Kaggle GPU offload (Whisper large-v3 + GPU scoring)
-
-Local CPU mode works without Kaggle. For faster transcription and the **GPU fusion channel**:
-
-1. **Kaggle notebook** (GPU T4 x2 recommended)
-   - Upload `kaggle_gpu_server.ipynb` to Kaggle (or copy cells into a new notebook).
-   - **Settings → Accelerator → GPU**.
-   - Add secrets if needed: `HF_TOKEN` (HuggingFace, for pyannote/align models).
-   - Run **Cell 1** (install + kernel restart), then **Cell 2** (loads WhisperX, starts server + ngrok).
-   - Copy the printed URL, e.g. `https://xxxx.ngrok-free.dev`.
-
-2. **Local `.env`** (must match the notebook secret):
-
+### Step 2: Configure your Local `.env`
+Update your local [`.env`](file:///c:/Users/Manav/Downloads/openHands2/.env) file with the tunnel configuration:
 ```env
 KAGGLE_GPU_URL=https://xxxx.ngrok-free.dev
 KAGGLE_SECRET=sentinEL2026
 SENTINEL_SECRET=sentinEL2026
+SKIP_LOCAL_WHISPER_WHEN_KAGGLE=true
 ```
 
-3. **Verify connection** (from project root):
-
+### Step 3: Verify the Connection
+Test the bridge before running analysis:
 ```bash
-pip install httpx
 python scripts/test_kaggle_gpu.py
 ```
 
-4. **Calibrate then analyze** as usual (`restart_web.ps1` or CLI). Calibration calls Kaggle `/calibrate` and saves `gpu_reading_profile` into `calibration_profile.json`. Interview analysis calls `/analyze_batch` per answer for the GPU score channel.
+---
 
-**Notes**
+## ⚙️ Configuration Reference (`.env`)
 
-- ngrok URL **changes every time** you restart the Kaggle notebook — update `.env` each session.
-- Keep the Kaggle notebook **running** while analyzing locally.
-- Re-calibrate after enabling GPU so `gpu_reading_profile` exists (older profiles only have CPU openSMILE baselines).
-- Local Whisper can stay `small` on CPU; Kaggle runs `large-v3` for the GPU path only.
+You can tune SentinEL's behavior by modifying the environment variables in [`.env`](file:///c:/Users/Manav/Downloads/openHands2/.env).
 
-## Dual-profile contrastive engine (v5)
+### Primary Detection Thresholds
 
-Calibration video = **intentional script reading**. The system builds a **SCRIPT profile** from that video (how this user sounds while reading).
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `ENABLE_CONTRASTIVE_ENGINE` | `true` | Enables dual-profile (SCRIPT vs NATURAL) similarity tracking. |
+| `CONTRASTIVE_MARGIN` | `0.14` | The similarity margin threshold above which windows are flagged as suspicious. |
+| `ENABLE_INTRA_INDIVIDUAL` | `true` | Enable comparisons relative to the speaker's own baseline profile. |
+| `ENABLE_COGNITIVE_SOURCING` | `true` | Activates internal vs. external speech-sourcing analysis. |
+| `ALERT_THRESHOLD` | `0.55` | The base threshold for the fused scoring algorithm to raise alerts. |
 
-During the interview, a **NATURAL profile** is built **only** from windows with high naturality confidence. The first N seconds are **never** assumed natural (no baseline poisoning if the candidate reads from second 1).
+### Speed & Performance Tuning
 
-Per 4s window:
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `FAST_CALIBRATION` | `true` | Skips speaker diarization during calibration, speeding up the process. |
+| `WHISPER_MODEL_SIZE` | `small` | Whisper model used for local ASR (`tiny`, `base`, `small`, `medium`). |
+| `WHISPER_CALIBRATION_MODEL_SIZE` | `tiny` | Smaller Whisper size to expedite the calibration step. |
+| `AUDIO_WINDOW_PARALLEL_WORKERS` | `4` | Number of parallel threads extracting acoustic features. |
+| `WHISPER_SKIP_ALIGN_INTERVIEW` | `true` | Skips wav2vec alignment for interview turns to save ~1–3s per answer on CPU. |
 
-| Signal | Meaning |
-|--------|---------|
-| `script_similarity` | Similarity to calibration reading behavior |
-| `natural_similarity` | Similarity to opportunistically learned spontaneous behavior |
-| `contrastive_score` | `script_similarity - natural_similarity` (primary) |
-| `naturality_score` | Cognitive spontaneity estimate (gates NATURAL profile updates) |
+---
 
-Alert when contrastive EWMA exceeds `CONTRASTIVE_MARGIN` with temporal persistence. Confidence: `LOW` / `MEDIUM` / `HIGH`.
+## 📂 Project Structure
 
-`results.json` includes `window_logs` (per-window debug) when contrastive mode is on. Re-run **calibrate** to produce a v5 `script_profile` if you have an older v4 profile.
-
-Toggle in `.env`: `ENABLE_CONTRASTIVE_ENGINE`, `CONTRASTIVE_MARGIN`, `NATURALITY_UPDATE_THRESHOLD`, etc.
-
-### AI interviewer + human candidate
-
-Pyannote labels speakers anonymously. Choose who is scored as the **candidate** via `CANDIDATE_SPEAKER` in `.env`:
-
-| Value | Use when |
-|-------|----------|
-| `most_speech` | Candidate talks the most (legacy default) |
-| `least_speech` | AI interviewer talks more total time than the human |
-| `longest_turns` | AI asks short prompts; candidate gives longer answers (recommended) |
-
-Set `CANDIDATE_TURN_MIN_SEC=3` to ignore short AI question bursts when using `longest_turns`.
-
-## Project layout
-
-```
-├── config.py
-├── gpu_client.py              # CPU no-op stub (GPU optional later)
-├── main.py
-├── processors/
-│   ├── audio_processor.py
-│   ├── video_processor.py
-│   └── transcript_processor.py
-├── engine/
-│   ├── analysis_engine.py
-│   ├── contrastive_engine.py  # dual-profile orchestrator
-│   ├── profile_memory.py      # SCRIPT / NATURAL profiles
-│   ├── feature_extraction.py
-│   ├── naturality_scorer.py
-│   ├── transition_detector.py
-│   ├── temporal_evidence.py
-│   ├── fused_scorer.py
-│   ├── linguistic_analyzer.py
-│   ├── gaze_analyzer.py
-│   └── lip_analyzer.py
-└── scoring/
-    └── baseline.py
-```
-
-## What you do NOT need for local CPU mode
-
-- No Kaggle account
-- No ngrok account
-- No ANTHROPIC_API_KEY
-- No CUDA / NVIDIA GPU drivers
-- No internet connection after first run (models cached locally)
-- No running servers or background processes
-- No Docker
-
-The only external service used at runtime is HuggingFace model download — and only on the very first run.
+*   [**`main.py`**](file:///c:/Users/Manav/Downloads/openHands2/main.py): CLI interface entry point.
+*   [**`config.py`**](file:///c:/Users/Manav/Downloads/openHands2/config.py): Configuration schema loader.
+*   [**`processors/`**](file:///c:/Users/Manav/Downloads/openHands2/processors):
+    *   [`audio_processor.py`](file:///c:/Users/Manav/Downloads/openHands2/processors/audio_processor.py): Audio feature extraction (openSMILE/Parselmouth) and turn isolation.
+    *   [`transcript_processor.py`](file:///c:/Users/Manav/Downloads/openHands2/processors/transcript_processor.py): Local WhisperX speech-to-text runner.
+    *   [`speaker_selection.py`](file:///c:/Users/Manav/Downloads/openHands2/processors/speaker_selection.py): Candidate-to-AI speaker assignment logic.
+*   [**`engine/`**](file:///c:/Users/Manav/Downloads/openHands2/engine):
+    *   [`contrastive_engine.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/contrastive_engine.py): SCRIPT/NATURAL profile comparative engine.
+    *   [`personal_baseline.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/personal_baseline.py): Stores and tracks individual baseline parameters.
+    *   [`intra_individual.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/intra_individual.py): Session-level individual deviation manager.
+    *   [`cognitive_sourcing.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/cognitive_sourcing.py): Cognitive generation/retrieval source classifier.
+    *   [`semantic_specificity.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/semantic_specificity.py): Rule-based transcript NLP specificity scorer.
+    *   [`answer_synthesis.py`](file:///c:/Users/Manav/Downloads/openHands2/engine/answer_synthesis.py): Fuses all layer signals to yield final answer-level verdicts.
+*   [**`web/`**](file:///c:/Users/Manav/Downloads/openHands2/web):
+    *   [`app.py`](file:///c:/Users/Manav/Downloads/openHands2/web/app.py): Web service routes and asynchronous job manager.
+*   [**`kaggle_gpu_server.ipynb`**](file:///c:/Users/Manav/Downloads/openHands2/kaggle_gpu_server.ipynb): Offload server notebook for Kaggle environment.
