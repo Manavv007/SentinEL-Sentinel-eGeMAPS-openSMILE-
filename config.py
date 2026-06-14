@@ -686,6 +686,9 @@ CANDIDATE_SPEAKER: str = _CANDIDATE_SPEAKER_RAW
 CANDIDATE_TURN_MIN_SEC: float = _get_float("CANDIDATE_TURN_MIN_SEC", 3.0)
 # Drop candidate-track segments shorter than this (mis-labeled AI prompts)
 MIN_CANDIDATE_SEGMENT_SEC: float = _get_float("MIN_CANDIDATE_SEGMENT_SEC", 4.0)
+SILENCE_GAP_SEC: float = _get_float("SILENCE_GAP_SEC", 4.0)
+CANDIDATE_SILENCE_MERGE_GAP_SEC: float = _get_float("CANDIDATE_SILENCE_MERGE_GAP_SEC", 3.0)
+MIN_ANSWER_DURATION_SEC: float = _get_float("MIN_ANSWER_DURATION_SEC", 8.0)
 # Drop ASR segments with fewer words after diarization (e.g. "Sure.")
 DIARIZATION_MIN_ANSWER_WORDS: int = max(
     1, int(_get_float("DIARIZATION_MIN_ANSWER_WORDS", 5))

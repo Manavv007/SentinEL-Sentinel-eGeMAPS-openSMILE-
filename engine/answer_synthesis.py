@@ -254,6 +254,13 @@ def synthesize_final_decision(
 
     reasons: list[str] = []
 
+    if duration_sec < 6.0 or window_count <= 1:
+        reasons.append(
+            f"insufficient duration ({duration_sec:.1f}s, {window_count} windows) "
+            f"for reliable verdict"
+        )
+        return "CLEAR", "LOW", reasons
+
     momentum = float(behavioral.get("suspicion_momentum", 0))
     natural_saturation = float(behavioral.get("natural_similarity_saturation_ratio", 0))
     nat_profile_samples = int(

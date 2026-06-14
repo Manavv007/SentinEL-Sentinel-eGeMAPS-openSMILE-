@@ -108,7 +108,10 @@ class AudioProcessor:
         primary, alternate, selection = build_dual_track_boundaries(
             segments,
             config.CANDIDATE_SPEAKER,
-            silence_gap_sec=SILENCE_GAP_SEC,
+            silence_gap_sec=getattr(
+                config, "SILENCE_GAP_SEC", getattr(config, "CANDIDATE_SILENCE_MERGE_GAP_SEC", 3.0)
+            ),
+            min_answer_duration_sec=getattr(config, "MIN_ANSWER_DURATION_SEC", None),
         )
         self.last_speaker_selection = selection
         primary_answers = [

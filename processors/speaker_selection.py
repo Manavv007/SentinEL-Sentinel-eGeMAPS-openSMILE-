@@ -441,8 +441,11 @@ def _selection_meta(
 def group_into_answers(
     candidate_segments: list[tuple[float, float]],
     *,
-    silence_gap_sec: float = 3.0,
+    silence_gap_sec: float | None = None,
+    min_answer_duration_sec: float | None = None,
 ) -> list[tuple[float, float]]:
+    if silence_gap_sec is None:
+        silence_gap_sec = getattr(config, "CANDIDATE_SILENCE_MERGE_GAP_SEC", 3.0)
     if not candidate_segments:
         return []
     ordered = sorted(candidate_segments, key=lambda s: s[0])
@@ -453,4 +456,56 @@ def group_into_answers(
             groups.append([(start, end)])
         else:
             groups[-1].append((start, end))
-    return [(g[0][0], g[-1][1]) for g in groups]
+    answers = [(g[0][0], g[-1][1]) for g in groups]
+
+    min_dur = 0.0
+    if min_answer_duration_sec is None:
+        min_dur = float(getattr(config, "MIN_ANSWER_DURATION_SEC", 0.0) or 0.0)
+    else:
+        min_dur = float(min_answer_duration_sec)
+    if min_dur > 0:
+        answers = _merge_short_fragments(answers, min_dur)
+    return answers
+
+
+def _merge_short_fragments(
+    answers: list[tuple[float, float]],
+    min_duration: float,
+) -> list[tuple[float, float]]:
+    if len(answers) <= 1:
+        return list(answers)
+    merged = list(answers)
+    changed = True
+    while changed:
+        changed = False
+        next_batch: list[tuple[float, float]] = []
+        i = 0
+        while i < len(merged):
+            start, end = merged[i]
+            duration = end - start
+            if duration < min_duration and len(merged) > 1:
+                if i == 0 and i + 1 < len(merged):
+                    ns, ne = merged[i + 1]
+                    next_batch.append((start, ne))
+                    i += 2
+                elif i == len(merged) - 1 and next_batch:
+                    ps, pe = next_batch[-1]
+                    next_batch[-1] = (ps, end)
+                    i += 1
+                else:
+                    gap_prev = start - next_batch[-1][1] if next_batch else float("inf")
+                    gap_next = merged[i + 1][0] - end if i + 1 < len(merged) else float("inf")
+                    if gap_prev <= gap_next and next_batch:
+                        ps, pe = next_batch[-1]
+                        next_batch[-1] = (ps, end)
+                        i += 1
+                    else:
+                        ns, ne = merged[i + 1]
+                        next_batch.append((start, ne))
+                        i += 2
+                changed = True
+                continue
+            next_batch.append((start, end))
+            i += 1
+        merged = next_batch
+    return merged
