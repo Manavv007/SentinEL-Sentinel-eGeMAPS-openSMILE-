@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 import wave
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,7 @@ class KaggleGPUClient:
         self._client: httpx.Client | None = None
         self._calibrate_client: httpx.Client | None = None
         self._segment_client: httpx.Client | None = None
+        self._http_lock = threading.Lock()
 
         if self.enabled:
             logger.info("KaggleGPUClient: configured at %s", self.base_url)
@@ -167,11 +169,16 @@ class KaggleGPUClient:
         self._calibrate_client = None
         self._segment_client = None
 
+    def _request(self, client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """httpx.Client is not reliably thread-safe — serialize GPU tunnel calls."""
+        with self._http_lock:
+            return client.request(method, url, **kwargs)
+
     def health(self) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled"}
         client = self._client_for()
-        resp = client.get("/health")
+        resp = self._request(client, "GET", "/health")
         resp.raise_for_status()
         return resp.json()
 
@@ -190,7 +197,7 @@ class KaggleGPUClient:
         data = {"secret": self.secret} if self.secret else {}
 
         try:
-            resp = client.post("/calibrate", files=files, data=data)
+            resp = self._request(client, "POST", "/calibrate", files=files, data=data)
             resp.raise_for_status()
             body = resp.json()
             if isinstance(body, dict) and body.get("error"):
@@ -208,6 +215,8 @@ class KaggleGPUClient:
         video_path: str,
         *,
         wav_path: str | None = None,
+        candidate_speaker: str | None = None,
+        force_speaker: str | None = None,
     ) -> dict[str, Any] | None:
         """
         Kaggle segmentation (fast VAD or pyannote) → candidate turn boundaries.
@@ -223,11 +232,13 @@ class KaggleGPUClient:
 
         client = self._client_for_segment()
         data: dict[str, str] = {
-            "candidate_speaker": config.CANDIDATE_SPEAKER,
+            "candidate_speaker": candidate_speaker or config.CANDIDATE_SPEAKER,
             "num_speakers": "2",
             "segment_mode": config.KAGGLE_SEGMENT_MODE,
             "min_candidate_sec": str(config.MIN_CANDIDATE_SEGMENT_SEC),
         }
+        if force_speaker:
+            data["force_speaker"] = force_speaker
         if config.HF_TOKEN:
             data["hf_token"] = config.HF_TOKEN
         if self.secret:
@@ -239,7 +250,7 @@ class KaggleGPUClient:
         try:
             with upload_path.open("rb") as handle:
                 files = {file_key: (upload_path.name, handle, mime)}
-                resp = client.post("/segment_interview", files=files, data=data)
+                resp = self._request(client, "POST", "/segment_interview", files=files, data=data)
             body: dict[str, Any] = {}
             try:
                 body = resp.json()
@@ -287,8 +298,15 @@ class KaggleGPUClient:
             data["skip_align"] = "true"
 
         try:
-            resp = client.post("/transcribe_answer", files=files, data=data)
-            resp.raise_for_status()
+            resp = self._request(client, "POST", "/transcribe_answer", files=files, data=data)
+            if resp.status_code >= 400:
+                try:
+                    err_body = resp.json()
+                    err = err_body.get("error", resp.text[:300])
+                except Exception:
+                    err = resp.text[:300]
+                logger.error("Kaggle /transcribe_answer HTTP %s: %s", resp.status_code, err)
+                return None
             body = resp.json()
             if isinstance(body, dict) and body.get("error"):
                 logger.error("Kaggle /transcribe_answer error: %s", body["error"])
@@ -344,7 +362,7 @@ class KaggleGPUClient:
             data["secret"] = self.secret
 
         try:
-            resp = client.post("/analyze_batch", files=files, data=data)
+            resp = self._request(client, "POST", "/analyze_batch", files=files, data=data)
             resp.raise_for_status()
             body = resp.json()
             if isinstance(body, dict) and body.get("error"):

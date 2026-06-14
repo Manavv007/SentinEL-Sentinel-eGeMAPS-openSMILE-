@@ -167,7 +167,7 @@ Prints a table of answers with contrastive scores and channel breakdowns.
 | **Remote GPU** | **Kaggle notebook** + **ngrok** + `httpx` | Optional offload |
 | **Math** | NumPy, SciPy | Profiles, similarities, EWMA |
 
-**Not used in current build:** LLM judge, Docker, cloud deployment (runs locally).
+**Optional (off by default):** LLM judge tie-breaker on AMBIGUOUS answers (`ENABLE_LLM_JUDGE`). **Not used:** Docker, cloud deployment (runs locally).
 
 ---
 
@@ -197,6 +197,7 @@ VIDEO FILE
             fused scorer (weighted channels + EWMA)
             session feedforward + finalize_interview_sourcing
             final semantic pass (protect personal answers)
+            optional LLM judge (AMBIGUOUS tie-breaker only, if enabled)
             └─► status + confidence + explanation list
 ```
 
@@ -250,8 +251,13 @@ Without calibration, `script_similarity` would be meaningless (no reference).
 | 11 | `finalize_interview_sourcing()` | Session-level external-source inference |
 | 12 | Final semantic pass | Protect personal-narrative answers from session downgrade |
 | 13 | `intra_session.finalize_session()` | Cross-answer drift summary |
+| 14 | `apply_llm_judge_to_answers()` (optional) | LLM tie-breaker on **AMBIGUOUS** only when `ENABLE_LLM_JUDGE=true` |
 
 Progress messages are tagged `[Local CPU]` or `[Kaggle GPU]` so you always know where work runs.
+
+### Optional LLM judge
+
+When enabled, `engine/llm_judge.py` calls a pluggable provider (`openai`, `anthropic`, or `ollama`) **only** for answers still marked `AMBIGUOUS` after step 13. It can promote to `PROBABLE_SCRIPT_READING`, demote to `CLEAR`, or leave `AMBIGUOUS`. Interviewer questions mis-labeled as answers (`is_interviewer_speech`) force `CLEAR` with a diarization warning. API failures fail open (status unchanged). Results include an `llm_judge` block per answer and `[analyze/llm_judge]` decision-log entries.
 
 ---
 

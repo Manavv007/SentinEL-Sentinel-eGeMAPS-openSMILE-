@@ -118,9 +118,7 @@ def _preload_sync() -> None:
             and cfg.SKIP_LOCAL_WHISPER_WHEN_KAGGLE
             and cfg.KAGGLE_GPU_URL
         ):
-            logging.getLogger(__name__).info(
-                "Skipping local Whisper preload — Kaggle GPU offload enabled"
-            )
+            logger.info("Skipping local Whisper preload — Kaggle GPU offload enabled")
         else:
             from processors.transcript_processor import preload_models
 
@@ -131,12 +129,10 @@ def _preload_sync() -> None:
         ):
             from processors.audio_processor import AudioProcessor
 
-            logging.getLogger(__name__).info("Preloading pyannote diarization pipeline...")
+            logger.info("Preloading pyannote diarization pipeline...")
             AudioProcessor.preload_heavy_models(diarization=True, opensmile=True)
     except Exception as exc:
-        import logging
-
-        logging.getLogger(__name__).warning("Model preload skipped: %s", exc)
+        logger.warning("Model preload skipped: %s", exc)
 
 
 def _job_dir(job_id: str) -> Path:

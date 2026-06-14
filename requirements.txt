@@ -20,8 +20,7 @@ whisperx==3.1.5
 opencv-python==4.10.0.84
 mediapipe==0.10.14
 
-# LLM
-# (LLM judge not used in this build)
+# LLM judge (optional — ENABLE_LLM_JUDGE=false by default; uses httpx, no extra packages)
 
 # Web UI
 fastapi==0.115.6

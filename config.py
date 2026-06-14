@@ -291,6 +291,12 @@ DOMINANCE_RATIO_BOOST_PER_UNIT: float = _get_float(
     "DOMINANCE_RATIO_BOOST_PER_UNIT", 0.045
 )
 DOMINANCE_RATIO_MAX_BOOST: float = _get_float("DOMINANCE_RATIO_MAX_BOOST", 0.09)
+DOMINANCE_NATURAL_FLOOR: float = _get_float("DOMINANCE_NATURAL_FLOOR", 0.20)
+DOMINANCE_MIN_PROFILE_CONFIDENCE: float = _get_float(
+    "DOMINANCE_MIN_PROFILE_CONFIDENCE", 0.35
+)
+# Peak evidence credibility in answer composite (0–1 persistence → blend strength)
+PEAK_CREDIBILITY_GAIN: float = _get_float("PEAK_CREDIBILITY_GAIN", 1.5)
 
 # Naturality score shaping
 NATURALITY_SIGMOID_CENTER: float = _get_float("NATURALITY_SIGMOID_CENTER", 0.32)
@@ -630,7 +636,13 @@ CALIBRATION_WINDOW_PARALLEL_WORKERS: int = max(
 KAGGLE_CALIBRATE_TIMEOUT_SEC: int = int(_get_float("KAGGLE_CALIBRATE_TIMEOUT_SEC", 90))
 KAGGLE_OFFLOAD: bool = _get_bool("KAGGLE_OFFLOAD", bool(KAGGLE_GPU_URL))
 KAGGLE_OFFLOAD_TRANSCRIPTION: bool = _get_bool("KAGGLE_OFFLOAD_TRANSCRIPTION", True)
-KAGGLE_PARALLEL_ANSWERS: int = max(1, int(_get_float("KAGGLE_PARALLEL_ANSWERS", 4)))
+# ngrok + single Kaggle worker: parallel uploads often stall; use 1 unless server is dedicated
+KAGGLE_PARALLEL_ANSWERS: int = max(1, int(_get_float("KAGGLE_PARALLEL_ANSWERS", 1)))
+KAGGLE_TRANSCRIBE_TIMEOUT_SEC: int = max(
+    15, int(_get_float("KAGGLE_TRANSCRIBE_TIMEOUT_SEC", 90))
+)
+# When Kaggle /transcribe_answer fails or times out, fall back to local Whisper
+KAGGLE_FALLBACK_LOCAL_ASR: bool = _get_bool("KAGGLE_FALLBACK_LOCAL_ASR", True)
 SKIP_LOCAL_WHISPER_WHEN_KAGGLE: bool = _get_bool("SKIP_LOCAL_WHISPER_WHEN_KAGGLE", True)
 # fast = Silero VAD + long-turn filter (~10–30s); pyannote = accurate but slow on CPU.
 KAGGLE_SEGMENT_MODE: str = _get_str("KAGGLE_SEGMENT_MODE", "pyannote").lower()
@@ -638,9 +650,12 @@ KAGGLE_SEGMENT_MODE: str = _get_str("KAGGLE_SEGMENT_MODE", "pyannote").lower()
 # selection logic as local, so offloading it preserves accuracy while removing the
 # slow local CPU diarization (~minutes). Auto-falls back to local if Kaggle is down.
 # Only the fast VAD mode is less reliable, so it stays opt-in.
+# Default on when KAGGLE_GPU_URL is set; local pyannote is opt-in via false + local fallback flags.
 KAGGLE_OFFLOAD_SEGMENTATION: bool = _get_bool(
-    "KAGGLE_OFFLOAD_SEGMENTATION", KAGGLE_OFFLOAD and KAGGLE_SEGMENT_MODE == "pyannote"
+    "KAGGLE_OFFLOAD_SEGMENTATION", bool(KAGGLE_GPU_URL)
 )
+# When false, /segment_interview failure does not fall back to local pyannote.
+KAGGLE_SEGMENT_LOCAL_FALLBACK: bool = _get_bool("KAGGLE_SEGMENT_LOCAL_FALLBACK", False)
 KAGGLE_SEGMENT_TIMEOUT_SEC: int = int(_get_float("KAGGLE_SEGMENT_TIMEOUT_SEC", 900))
 KAGGLE_FAST_MIN_CANDIDATE_SEC: float = _get_float("KAGGLE_FAST_MIN_CANDIDATE_SEC", 3.0)
 KAGGLE_SKIP_ALIGN_INTERVIEW: bool = _get_bool("KAGGLE_SKIP_ALIGN_INTERVIEW", True)
@@ -671,5 +686,47 @@ CANDIDATE_SPEAKER: str = _CANDIDATE_SPEAKER_RAW
 CANDIDATE_TURN_MIN_SEC: float = _get_float("CANDIDATE_TURN_MIN_SEC", 3.0)
 # Drop candidate-track segments shorter than this (mis-labeled AI prompts)
 MIN_CANDIDATE_SEGMENT_SEC: float = _get_float("MIN_CANDIDATE_SEGMENT_SEC", 4.0)
+# Drop ASR segments with fewer words after diarization (e.g. "Sure.")
+DIARIZATION_MIN_ANSWER_WORDS: int = max(
+    1, int(_get_float("DIARIZATION_MIN_ANSWER_WORDS", 5))
+)
+# Pad answer slice end to reduce mid-sentence cutoffs from diarization boundaries
+CANDIDATE_SEGMENT_END_PAD_SEC: float = _get_float("CANDIDATE_SEGMENT_END_PAD_SEC", 0.85)
 AI_SHORT_TURN_SEC: float = _get_float("AI_SHORT_TURN_SEC", 2.5)
 DIARIZATION_NUM_SPEAKERS: int = max(2, int(_get_float("DIARIZATION_NUM_SPEAKERS", 2)))
+# When Kaggle segmentation is on, skip slow local pyannote recovery (prevents 15–45 min hangs)
+DIARIZATION_RECOVERY_LOCAL_PYANNOTE: bool = _get_bool(
+    "DIARIZATION_RECOVERY_LOCAL_PYANNOTE", False
+)
+# Cap how many segments get re-transcribed during speaker-track recovery
+DIARIZATION_RECOVERY_MAX_ASR_SEGMENTS: int = max(
+    3, int(_get_float("DIARIZATION_RECOVERY_MAX_ASR_SEGMENTS", 16))
+)
+# Extra speaker-track recovery after ASR (extra Kaggle round-trips); disable if jobs stall
+DIARIZATION_SPEAKER_RECOVERY: bool = _get_bool("DIARIZATION_SPEAKER_RECOVERY", True)
+# Re-run Kaggle segmentation (alternate speaker / force_speaker) when kept segments are still bad
+DIARIZATION_AUTO_KAGGLE_FALLBACK: bool = _get_bool("DIARIZATION_AUTO_KAGGLE_FALLBACK", True)
+# Re-run local pyannote when post-ASR segments are bad (off by default when using Kaggle GPU)
+DIARIZATION_AUTO_LOCAL_FALLBACK: bool = _get_bool("DIARIZATION_AUTO_LOCAL_FALLBACK", False)
+
+# --- Optional LLM judge (AMBIGUOUS tie-breaker only) ---
+ENABLE_LLM_JUDGE: bool = _get_bool("ENABLE_LLM_JUDGE", False)
+LLM_PROVIDER: str = _get_str("LLM_PROVIDER", "openai").lower()
+LLM_MODEL: str = _get_str("LLM_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "").strip()
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "").strip()
+OPENAI_BASE_URL: str = _get_str("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENROUTER_BASE_URL: str = _get_str("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_APP_NAME: str = _get_str("OPENROUTER_APP_NAME", "SentinEL")
+OPENROUTER_HTTP_REFERER: str = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+ANTHROPIC_BASE_URL: str = _get_str("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+OLLAMA_BASE_URL: str = _get_str("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+LLM_JUDGE_PROMOTE_MIN: float = _get_float("LLM_JUDGE_PROMOTE_MIN", 0.72)
+LLM_JUDGE_CLEAR_MAX: float = _get_float("LLM_JUDGE_CLEAR_MAX", 0.28)
+LLM_JUDGE_MIN_CONFIDENCE: str = _get_str("LLM_JUDGE_MIN_CONFIDENCE", "MEDIUM").upper()
+LLM_JUDGE_TIMEOUT_SEC: float = _get_float("LLM_JUDGE_TIMEOUT_SEC", 30.0)
+LLM_JUDGE_MAX_ANSWERS: int = max(0, int(_get_float("LLM_JUDGE_MAX_ANSWERS", 0)))
+LLM_JUDGE_MIN_WORDS: int = max(1, int(_get_float("LLM_JUDGE_MIN_WORDS", 8)))
+LLM_JUDGE_TEMPERATURE: float = _get_float("LLM_JUDGE_TEMPERATURE", 0.0)
+LLM_JUDGE_MAX_TOKENS: int = max(256, int(_get_float("LLM_JUDGE_MAX_TOKENS", 768)))

@@ -17,10 +17,10 @@ import soundfile as sf
 
 import config
 from processors.speaker_selection import (
+    build_candidate_turns,
+    build_dual_track_boundaries,
     extract_segments_from_diarization,
-    filter_candidate_segments,
     group_into_answers,
-    select_candidate_speaker,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,35 @@ class AudioProcessor:
     def extract_audio(self, video_path: str) -> str:
         """Extract 16 kHz mono WAV; caller must delete the temp file."""
         return self._extract_audio(video_path)
+
+    def segment_interview_dual_track(
+        self, wav_path: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        """
+        Run pyannote once and return primary + alternate speaker answer boundaries.
+        Used when Kaggle primary track is mostly AI interviewer speech.
+        """
+        segments = self._diarize_raw_segments(wav_path)
+        if not segments:
+            duration = self._wav_duration(wav_path)
+            fallback = [{"answer_id": 0, "start_sec": 0.0, "end_sec": duration}]
+            return fallback, [], {"reason": "no_diarization_segments"}
+
+        primary, alternate, selection = build_dual_track_boundaries(
+            segments,
+            config.CANDIDATE_SPEAKER,
+            silence_gap_sec=SILENCE_GAP_SEC,
+        )
+        self.last_speaker_selection = selection
+        primary_answers = [
+            {"answer_id": i, "start_sec": float(s), "end_sec": float(e)}
+            for i, (s, e) in enumerate(primary)
+        ]
+        alternate_answers = [
+            {"answer_id": i, "start_sec": float(s), "end_sec": float(e)}
+            for i, (s, e) in enumerate(alternate)
+        ]
+        return primary_answers, alternate_answers, selection
 
     def process_interview_from_segmentation(
         self,
@@ -251,7 +280,9 @@ class AudioProcessor:
             logger.info("Loaded pyannote diarization pipeline (cached for process lifetime)")
             return _diarization_pipeline
 
-    def _diarize_speech(self, wav_path: str, mode: ProcessingMode) -> list[SpeechSegment]:
+    def _diarize_raw_segments(
+        self, wav_path: str, *, interview: bool = True
+    ) -> list[tuple[float, float, str]]:
         import soundfile as sf
         import torch
 
@@ -262,10 +293,9 @@ class AudioProcessor:
         else:
             waveform = torch.from_numpy(data.T)
 
-        # Always pass in-memory audio — avoids pyannote 4.x AudioDecoder errors on Windows
         audio_input: dict[str, Any] = {"waveform": waveform, "sample_rate": int(sr)}
         diarize_kwargs: dict[str, Any] = {}
-        if mode == ProcessingMode.INTERVIEW:
+        if interview:
             n_spk = int(config.DIARIZATION_NUM_SPEAKERS)
             diarize_kwargs = {
                 "num_speakers": n_spk,
@@ -282,15 +312,18 @@ class AudioProcessor:
             except Exception:
                 diarization_output = pipeline(audio_input)
         except Exception as exc:
-            # Do not fall back to file-path decoding on Windows:
-            # pyannote may try torchcodec/ffmpeg backend and fail/noise with warnings.
             logger.warning(
                 "Diarization kwargs failed; retrying with in-memory waveform only: %s",
                 exc,
             )
             diarization_output = pipeline(audio_input)
 
-        segments = extract_segments_from_diarization(diarization_output)
+        return extract_segments_from_diarization(diarization_output)
+
+    def _diarize_speech(self, wav_path: str, mode: ProcessingMode) -> list[SpeechSegment]:
+        segments = self._diarize_raw_segments(
+            wav_path, interview=(mode == ProcessingMode.INTERVIEW)
+        )
 
         if not segments:
             duration = self._wav_duration(wav_path)
@@ -299,21 +332,12 @@ class AudioProcessor:
         if mode == ProcessingMode.CALIBRATION:
             return [SpeechSegment(s, e) for s, e, _ in segments]
 
-        candidate, selection = select_candidate_speaker(segments)
-        candidate_turns = filter_candidate_segments(segments, candidate)
-        selection = {
-            **selection,
-            "candidate_turns_before_filter": sum(
-                1 for _, _, spk in segments if spk == candidate
-            ),
-            "candidate_turns_after_filter": len(candidate_turns),
-            "min_candidate_segment_sec": config.MIN_CANDIDATE_SEGMENT_SEC,
-        }
+        candidate_turns, selection = build_candidate_turns(segments)
         self.last_speaker_selection = selection
         logger.info(
             "Interview speaker selection: strategy=%s candidate=%s debug=%s",
             config.CANDIDATE_SPEAKER,
-            candidate,
+            selection.get("chosen_speaker"),
             selection,
         )
         return [SpeechSegment(start, end) for start, end in candidate_turns]
@@ -336,6 +360,9 @@ class AudioProcessor:
         start_sec: float,
         end_sec: float,
     ) -> bytes:
+        pad = float(getattr(config, "CANDIDATE_SEGMENT_END_PAD_SEC", 0.0) or 0.0)
+        max_end = len(waveform) / float(SAMPLE_RATE)
+        end_sec = min(max_end, float(end_sec) + pad)
         start = int(start_sec * SAMPLE_RATE)
         end = int(end_sec * SAMPLE_RATE)
         chunk = waveform[start:end]

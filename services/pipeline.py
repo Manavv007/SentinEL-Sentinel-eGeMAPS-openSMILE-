@@ -120,6 +120,13 @@ def _startup_models(
             phase="system",
             metrics={"kaggle_url": config.KAGGLE_GPU_URL, "runtime": "kaggle"},
         )
+        if config.KAGGLE_FALLBACK_LOCAL_ASR:
+            log.log(
+                "startup",
+                f"Preloading local Whisper ({config.WHISPER_MODEL_SIZE}) as Kaggle ASR fallback",
+                phase="system",
+            )
+            load_whisper_model()
         return gpu_client
 
     if calibration and config.FAST_CALIBRATION:
@@ -147,13 +154,21 @@ def _kaggle_prefetch_answers(
     answers: list[dict[str, Any]],
     gpu_reading_profile: dict[str, Any] | None,
     log: PipelineLogger,
+    *,
+    transcript_proc: TranscriptProcessor | None = None,
+    progress: ProgressCallback | None = None,
 ) -> list[tuple[dict[str, Any] | None, float | None]]:
-    """Parallel Kaggle transcription (+ GPU score when profile available)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """Kaggle transcription with per-answer timeout and local Whisper fallback."""
+    import concurrent.futures as cf
 
     n = len(answers)
     out: list[tuple[dict[str, Any] | None, float | None]] = [(None, None)] * n
     workers = min(config.KAGGLE_PARALLEL_ANSWERS, max(n, 1))
+    timeout_sec = int(config.KAGGLE_TRANSCRIBE_TIMEOUT_SEC)
+    fallback_local = bool(config.KAGGLE_FALLBACK_LOCAL_ASR and transcript_proc is not None)
+    kaggle_ok = 0
+    fallback_ok = 0
+    failed = 0
 
     def _one(idx: int, answer: dict[str, Any]) -> tuple[int, dict[str, Any] | None, float | None]:
         duration = float(answer["end_sec"]) - float(answer["start_sec"])
@@ -169,21 +184,142 @@ def _kaggle_prefetch_answers(
     log.log(
         "kaggle_prefetch",
         _tag_message(
-            f"Offloading {n} answer(s) to Kaggle GPU (workers={workers})",
+            f"Offloading {n} answer(s) to Kaggle GPU (workers={workers}, timeout={timeout_sec}s)",
             "kaggle",
         ),
         phase="analyze",
         metrics={
             "parallel_workers": workers,
             "has_gpu_profile": bool(gpu_reading_profile),
+            "fallback_local_asr": fallback_local,
             "runtime": "kaggle",
         },
     )
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_one, i, a) for i, a in enumerate(answers)]
-        for fut in as_completed(futures):
-            idx, transcript, gpu = fut.result()
-            out[idx] = (transcript, gpu)
+
+    def _local_fallback(idx: int, answer: dict[str, Any]) -> dict[str, Any] | None:
+        if not fallback_local or transcript_proc is None:
+            return None
+        rows = transcript_proc.transcribe_answers([answer])
+        return rows[0] if rows else None
+
+    def _store(
+        idx: int,
+        transcript: dict[str, Any] | None,
+        gpu: float | None,
+        *,
+        source: str,
+    ) -> None:
+        nonlocal kaggle_ok, fallback_ok, failed
+        out[idx] = (transcript, gpu)
+        if transcript and str(transcript.get("transcript", "")).strip():
+            if source == "kaggle":
+                kaggle_ok += 1
+            else:
+                fallback_ok += 1
+        else:
+            failed += 1
+
+    if workers <= 1:
+        for i, answer in enumerate(answers):
+            pct = 28 + int(20 * (i / max(n, 1)))
+            _emit(
+                progress,
+                pct,
+                f"Kaggle ASR answer {i + 1}/{n}...",
+                backend="kaggle",
+            )
+            transcript: dict[str, Any] | None = None
+            gpu_score: float | None = None
+            try:
+                with cf.ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(_one, i, answer)
+                    _idx, transcript, gpu_score = fut.result(timeout=timeout_sec)
+            except cf.TimeoutError:
+                log.log(
+                    "kaggle_prefetch",
+                    f"Kaggle ASR timeout on answer {i} after {timeout_sec}s",
+                    phase="analyze",
+                    level="warning",
+                    metrics={"answer_id": answer.get("answer_id"), "timeout_sec": timeout_sec},
+                )
+            except Exception as exc:
+                log.log(
+                    "kaggle_prefetch",
+                    f"Kaggle ASR error on answer {i}: {exc}",
+                    phase="analyze",
+                    level="warning",
+                )
+            if not transcript or not str(transcript.get("transcript", "")).strip():
+                local_row = _local_fallback(i, answer)
+                if local_row:
+                    log.log(
+                        "kaggle_prefetch",
+                        f"Answer {i}: local Whisper fallback",
+                        phase="analyze",
+                        level="warning",
+                        metrics={"answer_id": answer.get("answer_id")},
+                        decision="local_asr_fallback",
+                    )
+                    _store(i, local_row, None, source="local")
+                else:
+                    _store(i, transcript, gpu_score, source="kaggle")
+            else:
+                _store(i, transcript, gpu_score, source="kaggle")
+    else:
+        completed = 0
+        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_one, i, a): i for i, a in enumerate(answers)}
+            for fut in futures:
+                idx = futures[fut]
+                try:
+                    i, transcript, gpu = fut.result(timeout=timeout_sec)
+                except cf.TimeoutError:
+                    log.log(
+                        "kaggle_prefetch",
+                        f"Kaggle ASR timeout on answer {idx}",
+                        phase="analyze",
+                        level="warning",
+                    )
+                    local_row = _local_fallback(idx, answers[idx])
+                    _store(idx, local_row, None, source="local")
+                    completed += 1
+                    continue
+                except Exception as exc:
+                    log.log(
+                        "kaggle_prefetch",
+                        f"Kaggle ASR error on answer {idx}: {exc}",
+                        phase="analyze",
+                        level="warning",
+                    )
+                    local_row = _local_fallback(idx, answers[idx])
+                    _store(idx, local_row, None, source="local")
+                    completed += 1
+                    continue
+                if not transcript or not str(transcript.get("transcript", "")).strip():
+                    local_row = _local_fallback(i, answers[i])
+                    _store(i, local_row or transcript, gpu, source="local" if local_row else "kaggle")
+                else:
+                    _store(i, transcript, gpu, source="kaggle")
+                completed += 1
+                _emit(
+                    progress,
+                    28 + int(20 * (completed / max(n, 1))),
+                    f"Kaggle ASR {completed}/{n}...",
+                    backend="kaggle",
+                )
+
+    log.log(
+        "kaggle_prefetch",
+        f"ASR complete — kaggle={kaggle_ok}, local_fallback={fallback_ok}, empty={failed}",
+        phase="analyze",
+        metrics={
+            "kaggle_ok": kaggle_ok,
+            "local_fallback": fallback_ok,
+            "empty_or_failed": failed,
+            "total": n,
+        },
+    )
+    _emit(progress, 48, "Transcription complete", backend="kaggle" if kaggle_ok else "local")
     return out
 
 
@@ -627,6 +763,8 @@ def run_analyze(
         av_backend = "local"
     _emit(progress, 12, av_msg, backend=av_backend)
 
+    segment_ctx: dict[str, Any] = {"payload": None, "wav_path": None}
+
     def _run_audio() -> list[dict[str, Any]]:
         if not use_kaggle_segment:
             log.log(
@@ -645,14 +783,22 @@ def run_analyze(
             return audio.process_interview(str(video))
 
         wav_path = audio.extract_audio(str(video))
-        try:
-            t_seg = time.perf_counter()
-            segment_payload = gpu_client.segment_interview(str(video), wav_path=wav_path)
-            seg_sec = round(time.perf_counter() - t_seg, 2)
-            answers_payload = (segment_payload or {}).get("answers") or []
+        segment_ctx["wav_path"] = wav_path
+        t_seg = time.perf_counter()
+        _emit(
+            progress,
+            14,
+            f"Kaggle GPU diarization ({config.KAGGLE_SEGMENT_MODE}) — uploading audio...",
+            backend="kaggle",
+        )
+        segment_payload = gpu_client.segment_interview(str(video), wav_path=wav_path)
+        segment_ctx["payload"] = segment_payload
+        seg_sec = round(time.perf_counter() - t_seg, 2)
+        answers_payload = (segment_payload or {}).get("answers") or []
 
-            if not answers_payload:
-                seg_err = (segment_payload or {}).get("error") if segment_payload else None
+        if not answers_payload:
+            seg_err = (segment_payload or {}).get("error") if segment_payload else None
+            if config.KAGGLE_SEGMENT_LOCAL_FALLBACK:
                 log.log(
                     "kaggle_segment",
                     "Kaggle /segment_interview failed or empty — falling back to local pyannote",
@@ -665,30 +811,46 @@ def run_analyze(
                     },
                     decision=str(seg_err)[:200] if seg_err else None,
                 )
+                segment_ctx["wav_path"] = None
+                Path(wav_path).unlink(missing_ok=True)
                 return audio.process_interview(str(video))
-
             log.log(
                 "kaggle_segment",
-                f"Kaggle segment: {len(answers_payload)} answer(s) ({seg_sec}s)",
+                "Kaggle /segment_interview failed or empty — local fallback disabled",
                 phase="analyze",
+                level="error",
                 metrics={
-                    "answers": len(answers_payload),
                     "elapsed_sec": seg_sec,
-                    "segmentation_backend": (segment_payload or {}).get(
-                        "segmentation_backend"
-                    ),
-                    "speaker_selection": (segment_payload or {}).get("speaker_selection"),
+                    "kaggle_error": seg_err,
+                    "kaggle_error_type": (segment_payload or {}).get("error_type"),
                 },
-                decision=f"candidate_track={config.CANDIDATE_SPEAKER}",
+                decision=str(seg_err)[:200] if seg_err else "empty_answers",
             )
-            return audio.process_interview_from_segmentation(
-                str(video),
-                answers_payload,
-                speaker_selection=(segment_payload or {}).get("speaker_selection"),
-                wav_path=wav_path,
-            )
-        finally:
-            Path(wav_path).unlink(missing_ok=True)
+            return []
+
+        log.log(
+            "kaggle_segment",
+            f"Kaggle segment: {len(answers_payload)} answer(s) ({seg_sec}s)",
+            phase="analyze",
+            metrics={
+                "answers": len(answers_payload),
+                "elapsed_sec": seg_sec,
+                "segmentation_backend": (segment_payload or {}).get(
+                    "segmentation_backend"
+                ),
+                "speaker_selection": (segment_payload or {}).get("speaker_selection"),
+                "alternate_answers": len(
+                    (segment_payload or {}).get("alternate_answers") or []
+                ),
+            },
+            decision=f"candidate_track={config.CANDIDATE_SPEAKER}",
+        )
+        return audio.process_interview_from_segmentation(
+            str(video),
+            answers_payload,
+            speaker_selection=(segment_payload or {}).get("speaker_selection"),
+            wav_path=wav_path,
+        )
 
     def _run_video() -> dict[str, Any]:
         # Video gaze/lip scanning removed (performance + robustness).
@@ -746,6 +908,8 @@ def run_analyze(
             interview_answers,
             gpu_reading_profile,
             log,
+            transcript_proc=transcript_proc,
+            progress=progress,
         )
     elif interview_answers:
         _emit(
@@ -770,6 +934,512 @@ def run_analyze(
             },
         )
 
+    if interview_answers and (kaggle_cache is not None or local_transcript_cache is not None):
+        from engine.interviewer_segment_filter import (
+            assess_kept_segment_quality,
+            filter_segments_by_transcript,
+            is_interviewer_transcript,
+            is_off_topic_or_wrong_slice,
+            needs_speaker_track_recovery,
+        )
+
+        def _transcripts_for_filter() -> list[dict[str, Any]]:
+            if kaggle_cache is not None:
+                return [
+                    (
+                        kaggle_cache[i][0]
+                        if kaggle_cache[i][0] is not None
+                        else {"transcript": ""}
+                    )
+                    for i in range(len(interview_answers))
+                ]
+            return local_transcript_cache or []
+
+        def _apply_interviewer_filter() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            nonlocal interview_answers, kaggle_cache, local_transcript_cache
+            transcripts_for_filter = _transcripts_for_filter()
+            kept, excluded, keep_mask = filter_segments_by_transcript(
+                interview_answers, transcripts_for_filter
+            )
+            interview_answers = kept
+            if kaggle_cache is not None:
+                kaggle_cache = [
+                    row for row, keep in zip(kaggle_cache, keep_mask) if keep
+                ]
+            elif local_transcript_cache is not None:
+                local_transcript_cache = [
+                    row for row, keep in zip(local_transcript_cache, keep_mask) if keep
+                ]
+            return kept, excluded
+
+        primary_total = len(interview_answers)
+        kept, excluded = _apply_interviewer_filter()
+        if excluded:
+            log.log(
+                "diarization_filter",
+                f"Excluded {len(excluded)} interviewer segment(s) after ASR",
+                phase="analyze",
+                metrics={"excluded": excluded, "kept": len(kept)},
+                decision="interviewer_prompt_removed",
+            )
+
+        if (
+            config.DIARIZATION_SPEAKER_RECOVERY
+            and needs_speaker_track_recovery(len(excluded), primary_total, len(kept))
+        ):
+            from engine.interviewer_segment_filter import infer_alternate_speaker
+
+            payload = segment_ctx.get("payload") or {}
+            speaker_sel = payload.get("speaker_selection") or {}
+            alt_payload = payload.get("alternate_answers") or []
+            wav_path = segment_ctx.get("wav_path")
+            recovered = False
+            recovery_max_asr = int(config.DIARIZATION_RECOVERY_MAX_ASR_SEGMENTS)
+            allow_local_recovery = bool(config.DIARIZATION_RECOVERY_LOCAL_PYANNOTE)
+
+            _emit(
+                progress,
+                30,
+                "Speaker-track recovery: primary track mostly interviewer speech...",
+                backend="hybrid" if use_kaggle_segment else "local",
+            )
+
+            def _evaluate_track(
+                track_answers: list[dict[str, Any]],
+                *,
+                recovery_label: str,
+                speaker_meta: dict[str, Any] | None = None,
+            ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], Any]:
+                if not track_answers:
+                    return 0, [], [], None
+                if len(track_answers) > recovery_max_asr:
+                    log.log(
+                        "diarization_filter",
+                        f"Skipping {recovery_label}: {len(track_answers)} segments "
+                        f"exceeds recovery ASR cap ({recovery_max_asr})",
+                        phase="analyze",
+                        level="warning",
+                        metrics={
+                            "recovery_label": recovery_label,
+                            "segment_count": len(track_answers),
+                            "cap": recovery_max_asr,
+                        },
+                    )
+                    return 0, [], [], None
+                _emit(
+                    progress,
+                    32,
+                    f"Recovery ASR: {len(track_answers)} segment(s) via {recovery_label}...",
+                    backend="kaggle" if use_kaggle_asr else "local",
+                )
+                if use_kaggle_asr:
+                    track_cache = _kaggle_prefetch_answers(
+                        gpu_client,
+                        track_answers,
+                        gpu_reading_profile,
+                        log,
+                        transcript_proc=transcript_proc,
+                        progress=progress,
+                    )
+                    track_transcripts = [
+                        row[0] if row[0] is not None else {"transcript": ""}
+                        for row in track_cache
+                    ]
+                else:
+                    track_transcripts = transcript_proc.transcribe_answers(track_answers)
+                    track_cache = None
+                track_kept, track_excluded, track_mask = filter_segments_by_transcript(
+                    track_answers, track_transcripts
+                )
+                if len(track_kept) > len(kept):
+                    nonlocal interview_answers, kaggle_cache, local_transcript_cache, recovered
+                    interview_answers = track_kept
+                    if track_cache is not None:
+                        kaggle_cache = [
+                            row for row, keep in zip(track_cache, track_mask) if keep
+                        ]
+                        local_transcript_cache = None
+                    else:
+                        kaggle_cache = None
+                        local_transcript_cache = [
+                            row
+                            for row, keep in zip(track_transcripts, track_mask)
+                            if keep
+                        ]
+                    log.log(
+                        "diarization_filter",
+                        f"Recovered {len(track_kept)} candidate segment(s) via {recovery_label}",
+                        phase="analyze",
+                        level="warning",
+                        metrics={
+                            "recovery_label": recovery_label,
+                            "track_excluded": track_excluded,
+                            "track_kept": len(track_kept),
+                            "speaker_selection": speaker_meta,
+                        },
+                        decision=recovery_label,
+                    )
+                    recovered = True
+                return len(track_kept), track_kept, track_excluded, track_cache
+
+            def _try_alternate_payload(
+                boundaries: list[dict[str, Any]],
+                *,
+                recovery_label: str,
+                speaker_meta: dict[str, Any] | None = None,
+            ) -> None:
+                nonlocal recovered
+                if recovered or not boundaries or not wav_path or not Path(wav_path).is_file():
+                    return
+                log.log(
+                    "diarization_filter",
+                    f"Trying {recovery_label} ({len(boundaries)} segment(s))",
+                    phase="analyze",
+                    level="warning",
+                    metrics={
+                        "primary_kept": len(kept),
+                        "primary_excluded": len(excluded),
+                        "alternate_segments": len(boundaries),
+                    },
+                )
+                track_answers = audio.process_interview_from_segmentation(
+                    str(video),
+                    boundaries,
+                    speaker_selection={
+                        **speaker_sel,
+                        **(speaker_meta or {}),
+                        "recovery_track": recovery_label,
+                    },
+                    wav_path=str(wav_path),
+                )
+                _evaluate_track(
+                    track_answers,
+                    recovery_label=recovery_label,
+                    speaker_meta=speaker_meta,
+                )
+
+            # 1) Kaggle dual-track payload (when notebook returns alternate_answers)
+            if alt_payload:
+                _try_alternate_payload(
+                    alt_payload,
+                    recovery_label="alternate_speaker_track",
+                )
+
+            # 2) Kaggle re-segment forcing the other diarization label
+            if (
+                not recovered
+                and use_kaggle_segment
+                and wav_path
+                and Path(wav_path).is_file()
+            ):
+                alt_speaker = infer_alternate_speaker(speaker_sel)
+                if alt_speaker:
+                    _emit(
+                        progress,
+                        31,
+                        f"Kaggle re-segment with alternate speaker ({alt_speaker})...",
+                        backend="kaggle",
+                    )
+                    retry_payload = gpu_client.segment_interview(
+                        str(video),
+                        wav_path=str(wav_path),
+                        force_speaker=alt_speaker,
+                    )
+                    retry_answers = (retry_payload or {}).get("answers") or []
+                    if retry_answers:
+                        segment_ctx["payload"] = retry_payload
+                        _try_alternate_payload(
+                            retry_answers,
+                            recovery_label="kaggle_force_speaker",
+                            speaker_meta={
+                                "forced_speaker": alt_speaker,
+                                "speaker_selection": (retry_payload or {}).get(
+                                    "speaker_selection"
+                                ),
+                            },
+                        )
+
+            # 3) Local pyannote dual-track (opt-in — very slow on CPU; skipped when Kaggle segment is on)
+            if (
+                not recovered
+                and allow_local_recovery
+                and wav_path
+                and Path(wav_path).is_file()
+            ):
+                _emit(
+                    progress,
+                    33,
+                    "Local pyannote dual-track recovery (may take several minutes)...",
+                    backend="local",
+                )
+                log.log(
+                    "diarization_filter",
+                    "Building alternate speaker track locally (pyannote dual-track)",
+                    phase="analyze",
+                    level="warning",
+                    metrics={
+                        "primary_kept": len(kept),
+                        "kaggle_alternate_count": len(alt_payload),
+                    },
+                )
+                _primary_b, local_alt_b, local_sel = audio.segment_interview_dual_track(
+                    str(wav_path)
+                )
+                _try_alternate_payload(
+                    local_alt_b,
+                    recovery_label="local_dual_track_alternate",
+                    speaker_meta=local_sel,
+                )
+                if not recovered and _primary_b:
+                    _try_alternate_payload(
+                        _primary_b,
+                        recovery_label="local_dual_track_primary",
+                        speaker_meta=local_sel,
+                    )
+            elif not recovered and not allow_local_recovery:
+                log.log(
+                    "diarization_filter",
+                    "Skipping local pyannote recovery (DIARIZATION_RECOVERY_LOCAL_PYANNOTE=false)",
+                    phase="analyze",
+                    level="warning",
+                    metrics={"primary_kept": len(kept), "primary_excluded": len(excluded)},
+                )
+
+            # 4) Full local diarization when still insufficient (opt-in only)
+            min_expected = max(3, int(round(primary_total * 0.35)))
+            if (
+                not recovered
+                and allow_local_recovery
+                and len(kept) < min_expected
+            ):
+                log.log(
+                    "diarization_filter",
+                    "Insufficient candidate segments — re-running local pyannote diarization",
+                    phase="analyze",
+                    level="warning",
+                    metrics={"kept": len(kept), "min_expected": min_expected},
+                )
+                interview_answers = audio.process_interview(str(video))
+                if use_kaggle_asr:
+                    kaggle_cache = _kaggle_prefetch_answers(
+                        gpu_client,
+                        interview_answers,
+                        gpu_reading_profile,
+                        log,
+                        transcript_proc=transcript_proc,
+                        progress=progress,
+                    )
+                    local_transcript_cache = None
+                else:
+                    local_transcript_cache = transcript_proc.transcribe_answers(
+                        interview_answers
+                    )
+                    kaggle_cache = None
+                kept, excluded = _apply_interviewer_filter()
+                if excluded:
+                    log.log(
+                        "diarization_filter",
+                        f"After local diarization: excluded {len(excluded)} interviewer segment(s)",
+                        phase="analyze",
+                        metrics={"excluded": excluded, "kept": len(kept)},
+                    )
+
+        def _redo_kaggle_segmentation(
+            reason: str, *, metrics: dict[str, Any] | None = None
+        ) -> bool:
+            """Re-segment on Kaggle (alternate track / force_speaker) when quality is still bad."""
+            nonlocal interview_answers, kaggle_cache, local_transcript_cache
+            from engine.interviewer_segment_filter import infer_alternate_speaker
+
+            _emit(
+                progress,
+                26,
+                "Re-segmenting on Kaggle GPU (speaker track quality too low)...",
+                backend="kaggle",
+            )
+            log.log(
+                "diarization_filter",
+                f"Kaggle re-segmentation: {reason}",
+                phase="analyze",
+                level="warning",
+                metrics=metrics or {},
+                decision="kaggle_quality_fallback",
+            )
+
+            wav_path = segment_ctx.get("wav_path")
+            if not wav_path or not Path(str(wav_path)).is_file():
+                wav_path = audio.extract_audio(str(video))
+                segment_ctx["wav_path"] = wav_path
+
+            payload = segment_ctx.get("payload") or {}
+            speaker_sel = payload.get("speaker_selection") or audio.last_speaker_selection or {}
+            alt_payload = payload.get("alternate_answers") or []
+            recovered = False
+
+            def _apply_kaggle_track(
+                boundaries: list[dict[str, Any]],
+                *,
+                recovery_label: str,
+                speaker_meta: dict[str, Any] | None = None,
+            ) -> bool:
+                nonlocal interview_answers, kaggle_cache, local_transcript_cache, recovered
+                if not boundaries:
+                    return False
+                track_answers = audio.process_interview_from_segmentation(
+                    str(video),
+                    boundaries,
+                    speaker_selection={
+                        **speaker_sel,
+                        **(speaker_meta or {}),
+                        "recovery_track": recovery_label,
+                    },
+                    wav_path=str(wav_path),
+                )
+                if not track_answers:
+                    return False
+                if use_kaggle_asr:
+                    track_cache = _kaggle_prefetch_answers(
+                        gpu_client,
+                        track_answers,
+                        gpu_reading_profile,
+                        log,
+                        transcript_proc=transcript_proc,
+                        progress=progress,
+                    )
+                    track_transcripts = [
+                        row[0] if row[0] is not None else {"transcript": ""}
+                        for row in track_cache
+                    ]
+                else:
+                    track_transcripts = transcript_proc.transcribe_answers(track_answers)
+                    track_cache = None
+                track_kept, track_excluded, track_mask = filter_segments_by_transcript(
+                    track_answers, track_transcripts
+                )
+                if len(track_kept) <= len(interview_answers):
+                    return False
+                interview_answers = track_kept
+                if track_cache is not None:
+                    kaggle_cache = [
+                        row for row, keep in zip(track_cache, track_mask) if keep
+                    ]
+                    local_transcript_cache = None
+                else:
+                    kaggle_cache = None
+                    local_transcript_cache = [
+                        row for row, keep in zip(track_transcripts, track_mask) if keep
+                    ]
+                log.log(
+                    "diarization_filter",
+                    f"Kaggle quality fallback recovered {len(track_kept)} segment(s) via {recovery_label}",
+                    phase="analyze",
+                    level="warning",
+                    metrics={
+                        "recovery_label": recovery_label,
+                        "track_excluded": track_excluded,
+                        "track_kept": len(track_kept),
+                    },
+                    decision=recovery_label,
+                )
+                recovered = True
+                return True
+
+            if alt_payload and _apply_kaggle_track(
+                alt_payload, recovery_label="kaggle_alternate_quality_fallback"
+            ):
+                return True
+
+            alt_speaker = infer_alternate_speaker(speaker_sel)
+            if alt_speaker:
+                retry_payload = gpu_client.segment_interview(
+                    str(video),
+                    wav_path=str(wav_path),
+                    force_speaker=alt_speaker,
+                )
+                retry_answers = (retry_payload or {}).get("answers") or []
+                if retry_answers:
+                    segment_ctx["payload"] = retry_payload
+                    if _apply_kaggle_track(
+                        retry_answers,
+                        recovery_label="kaggle_force_speaker_quality_fallback",
+                        speaker_meta={
+                            "forced_speaker": alt_speaker,
+                            "speaker_selection": (retry_payload or {}).get(
+                                "speaker_selection"
+                            ),
+                        },
+                    ):
+                        return True
+            return recovered
+
+        def _redo_local_diarization(reason: str, *, metrics: dict[str, Any] | None = None) -> None:
+            nonlocal interview_answers, kaggle_cache, local_transcript_cache
+            _emit(
+                progress,
+                26,
+                "Re-segmenting with local pyannote (speaker track quality too low)...",
+                backend="local",
+            )
+            log.log(
+                "diarization_filter",
+                f"Local pyannote re-diarization: {reason}",
+                phase="analyze",
+                level="warning",
+                metrics=metrics or {},
+                decision="local_pyannote_quality_fallback",
+            )
+            interview_answers = audio.process_interview(str(video))
+            if use_kaggle_asr:
+                kaggle_cache = _kaggle_prefetch_answers(
+                    gpu_client,
+                    interview_answers,
+                    gpu_reading_profile,
+                    log,
+                    transcript_proc=transcript_proc,
+                    progress=progress,
+                )
+                local_transcript_cache = None
+            else:
+                local_transcript_cache = transcript_proc.transcribe_answers(
+                    interview_answers
+                )
+                kaggle_cache = None
+            kept, excluded = _apply_interviewer_filter()
+            if excluded:
+                log.log(
+                    "diarization_filter",
+                    f"After local fallback: excluded {len(excluded)} bad segment(s)",
+                    phase="analyze",
+                    metrics={"excluded": excluded, "kept": len(kept)},
+                )
+
+        quality_ok, quality_meta = assess_kept_segment_quality(_transcripts_for_filter())
+        if not quality_ok:
+            if use_kaggle_segment and config.DIARIZATION_AUTO_KAGGLE_FALLBACK:
+                _redo_kaggle_segmentation(
+                    str(quality_meta.get("reason", "low_quality_segments")),
+                    metrics=quality_meta,
+                )
+            elif config.DIARIZATION_AUTO_LOCAL_FALLBACK:
+                _redo_local_diarization(
+                    str(quality_meta.get("reason", "low_quality_segments")),
+                    metrics=quality_meta,
+                )
+            quality_ok, quality_meta = assess_kept_segment_quality(_transcripts_for_filter())
+            if not quality_ok:
+                log.log(
+                    "diarization_filter",
+                    "Segment quality still low after segmentation fallback",
+                    phase="analyze",
+                    level="warning",
+                    metrics=quality_meta,
+                )
+
+    wav_cleanup = segment_ctx.get("wav_path")
+    if wav_cleanup:
+        Path(wav_cleanup).unlink(missing_ok=True)
+        segment_ctx["wav_path"] = None
+
     results_answers: list[dict] = []
     n_answers = max(len(interview_answers), 1)
 
@@ -785,10 +1455,10 @@ def run_analyze(
             backend=score_backend,
         )
 
-        ac_score, ac_breakdown = engine.score_answer(answer["windows"], reading_profile)
         duration = float(answer["end_sec"]) - float(answer["start_sec"])
 
         gpu: float | None = None
+        transcript: dict[str, Any] | None = None
         if kaggle_cache is not None:
             transcript, gpu = kaggle_cache[idx]
             if transcript is None:
@@ -820,6 +1490,24 @@ def run_analyze(
                 gpu_reading_profile or {},
                 duration,
             )
+
+        tx_text = str((transcript or {}).get("transcript", ""))
+        if is_interviewer_transcript(tx_text) or is_off_topic_or_wrong_slice(tx_text):
+            log.log(
+                "diarization_filter",
+                f"Skipping answer {aid}: mis-segmented transcript after filter",
+                phase="analyze",
+                level="warning",
+                metrics={
+                    "start_sec": answer.get("start_sec"),
+                    "end_sec": answer.get("end_sec"),
+                    "transcript_preview": tx_text[:160],
+                },
+                decision="skip_missegmented_answer",
+            )
+            continue
+
+        ac_score, ac_breakdown = engine.score_answer(answer["windows"], reading_profile)
         tech_density = _answer_technical_density(transcript)
         ac_score = AnalysisEngine.calibrate_channel_score(
             ac_score,
@@ -1110,6 +1798,11 @@ def run_analyze(
             metrics=session_intra.get("cross_answer_drift"),
             decision=f"drift_uniformity={session_intra.get('cross_answer_drift', {}).get('cross_answer_uniformity')}",
         )
+
+    if config.ENABLE_LLM_JUDGE:
+        from engine.llm_judge import apply_llm_judge_to_answers
+
+        results_answers = apply_llm_judge_to_answers(results_answers, log=log)
 
     payload: dict[str, Any] = {
         "version": 5 if use_contrastive else 4,

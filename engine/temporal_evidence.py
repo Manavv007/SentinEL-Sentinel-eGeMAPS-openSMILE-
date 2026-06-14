@@ -7,6 +7,7 @@ from typing import Any
 
 import config
 import numpy as np
+from engine.scoring_v3 import compute_answer_composite_score
 from engine.suspicion_calibration import (
     SuspicionLevel,
     aggregate_answer_evidence,
@@ -203,6 +204,7 @@ class TemporalEvidenceTracker:
         window_dicts = [
             {
                 "suspicion_level": w.suspicion_level,
+                "suspicious_flag": w.suspicious,
                 "contrastive_score": w.contrastive_score,
                 "script_similarity": w.script_similarity,
                 "natural_similarity": w.natural_similarity,
@@ -273,15 +275,32 @@ class TemporalEvidenceTracker:
         momentum_summary = self._momentum.summary()
         streak_boost = self._momentum.streak_composite_boost()
 
-        composite, composite_meta = compute_calibrated_composite(
+        window_composite, window_meta = compute_answer_composite_score(
+            window_dicts,
+            ewma=ewma,
+            peak_ewma=self._peak_ewma,
+            margin=margin,
+            horizon=horizon,
+        )
+        evidence_composite, evidence_meta = compute_calibrated_composite(
             ewma=ewma,
             peak_ewma=self._peak_ewma,
             weighted_evidence=evidence["weighted_evidence"],
             margin=margin,
             horizon=horizon,
             suspicion_momentum=momentum_summary.get("suspicion_momentum", 0.0),
-            streak_boost=streak_boost,
+            streak_boost=0.0,
         )
+        composite = window_composite
+        evidence_norm = float(evidence_meta.get("evidence_norm", 0.0) or 0.0)
+        if evidence_norm >= 0.35 and evidence_composite > composite:
+            alpha = min(1.0, config.PEAK_CREDIBILITY_GAIN * evidence_norm)
+            composite = composite + alpha * max(0.0, evidence_composite - composite)
+        composite = min(1.0, composite + streak_boost)
+        composite_meta = {**window_meta, **evidence_meta}
+        composite_meta["composite_score"] = round(composite, 6)
+        composite_meta["window_composite"] = round(window_composite, 6)
+        composite_meta["evidence_composite"] = round(evidence_composite, 6)
         composite_meta.update(momentum_summary)
         composite_meta["streak_boost"] = round(streak_boost, 6)
         composite_meta["answer_duration_sec"] = round(duration, 4)

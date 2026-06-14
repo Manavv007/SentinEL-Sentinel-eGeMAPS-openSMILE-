@@ -204,11 +204,13 @@ def compute_calibrated_composite(
     if suspicion_momentum >= config.MOMENTUM_MED_THRESHOLD:
         peak_blend = max(peak_blend, config.PEAK_EWMA_MOMENTUM_BLEND)
 
-    composite = max(
-        ewma * config.COMPOSITE_EWMA_BLEND,
-        peak_ewma * peak_blend,
-        evidence_component,
-    )
+    composite_base = float(ewma) * config.COMPOSITE_EWMA_BLEND
+    peak_evidence = max(peak_ewma * peak_blend, evidence_component)
+    persistence = min(1.0, evidence_norm)
+    if suspicion_momentum >= config.MOMENTUM_MED_THRESHOLD:
+        persistence = min(1.0, persistence + 0.15 * suspicion_momentum)
+    alpha = min(1.0, config.PEAK_CREDIBILITY_GAIN * persistence)
+    composite = composite_base + alpha * max(0.0, peak_evidence - composite_base)
     composite += streak_boost
 
     if horizon and getattr(horizon, "script_dominance_active", False):

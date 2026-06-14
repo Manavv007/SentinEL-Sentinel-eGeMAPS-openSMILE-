@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
@@ -55,7 +54,7 @@ def spontaneity_modulation_factor(
         max_reduction = config.WEAK_SCRIPT_MAX_SPONT_REDUCTION
 
     reduction = min(reduction, max_reduction)
-    return float(max(1.0 - max_reduction, config.SPONTANEITY_MODULATION_FLOOR))
+    return float(max(1.0 - reduction, config.SPONTANEITY_MODULATION_FLOOR))
 
 
 def modulated_suspicion_score(
@@ -81,6 +80,7 @@ def modulated_suspicion_score(
     """
     s = float(max(0.0, min(1.0, script_similarity)))
     n_sim = float(max(0.0, min(1.0, natural_similarity)))
+    prof = float(max(0.0, min(1.0, profile_confidence)))
 
     script_emph = nonlinear_script_emphasis(s)
     mod = spontaneity_modulation_factor(
@@ -128,9 +128,6 @@ def modulated_suspicion_score(
         script_emph *= max(0.62, 1.0 - config.FLUENT_LINGUISTIC_DAMPEN * cog_spont)
 
     # --- Dynamic range recovery (nonlinear amplification) ---
-    # When script similarity is already elevated, weak-looking contrastive values can still
-    # indicate guided speech. We amplify script emphasis nonlinearly but only in the mid/high
-    # script regime and when spontaneity isn't extremely high.
     nat = float(max(0.0, min(1.0, naturality_score)))
     if s >= 0.55 and nat <= 0.82 and cog_spont < 0.50:
         x = (s - 0.55) / 0.45
@@ -138,26 +135,23 @@ def modulated_suspicion_score(
         script_emph = min(1.25, script_emph * (1.0 + amp))
 
     # --- Relative dominance scoring (script stronger than natural) ---
-    # Ratio > 1 means script profile fits better than natural profile.
-    # This adds separation without globally lowering thresholds.
-    ratio = s / max(n_sim, 0.08)
+    ratio = s / max(n_sim, config.DOMINANCE_NATURAL_FLOOR)
     dominance_boost = 0.0
-    if ratio >= config.DOMINANCE_RATIO_MIN and s >= 0.55 and nat <= 0.85 and cog_spont < 0.52:
+    if (
+        prof >= config.DOMINANCE_MIN_PROFILE_CONFIDENCE
+        and ratio >= config.DOMINANCE_RATIO_MIN
+        and s >= 0.55
+        and nat <= 0.85
+        and cog_spont < 0.52
+    ):
         dominance_boost = min(
             config.DOMINANCE_RATIO_MAX_BOOST,
             (ratio - config.DOMINANCE_RATIO_MIN)
             * config.DOMINANCE_RATIO_BOOST_PER_UNIT,
         )
-    elif (
-        ratio >= config.DOMINANCE_RATIO_MIN
-        and style_leak >= config.PROFILE_STYLE_LEAK_MIN
-        and cog_spont >= config.FLUENT_NATURAL_SPONTANEITY_FLOOR
-    ):
-        dominance_boost = 0.0
+        dominance_boost *= prof
 
     # --- Reduce oversuppression asymmetrically when script is high ---
-    # Strong script evidence should decay slower than weak suspicion. Here we soften suppression
-    # slightly when script is already elevated (does not remove spontaneity protection).
     sup = float(suppression)
     if s >= 0.55:
         soft = min(0.35, (s - 0.55) / 0.45)
@@ -177,12 +171,34 @@ def window_temporal_weight(script_similarity: float, contrastive_score: float) -
     s = float(script_similarity)
     w = 1.0
     if s >= config.STRONG_SCRIPT_THRESHOLD:
-        w += config.STRONG_WINDOW_WEIGHT_BONUS * ((s - config.STRONG_SCRIPT_THRESHOLD) / 0.32)
+        span = max(1.0 - config.STRONG_SCRIPT_THRESHOLD, 1e-6)
+        w += config.STRONG_WINDOW_WEIGHT_BONUS * ((s - config.STRONG_SCRIPT_THRESHOLD) / span)
     elif s >= 0.62:
         w += 0.15
     if contrastive_score > config.CONTRASTIVE_MARGIN:
         w += 0.1
     return float(min(2.2, w))
+
+
+def weighted_percentile(
+    values: list[float],
+    weights: list[float],
+    q: float,
+) -> float:
+    """Weighted percentile (q in 0–100); weights are importance, not score multipliers."""
+    if not values:
+        return 0.0
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    if v.size != w.size:
+        raise ValueError("values and weights must have the same length")
+    total = float(np.sum(w))
+    if total <= 0:
+        return float(np.percentile(v, q))
+    order = np.argsort(v)
+    v_sorted, w_sorted = v[order], w[order]
+    cum = np.cumsum(w_sorted) - 0.5 * w_sorted
+    return float(np.interp(q / 100.0 * total, cum, v_sorted))
 
 
 def compute_answer_composite_score(
@@ -194,8 +210,10 @@ def compute_answer_composite_score(
     horizon: Any | None = None,
 ) -> tuple[float, dict[str, float]]:
     """
-    Blend EWMA with peak and strong-window evidence so one benign tail cannot erase spikes.
+    Blend EWMA with peak and strong-window evidence.
+    Benign EWMA can pull the composite down when peak evidence is not widespread.
     """
+    del margin  # reserved for horizon floor scaling via config
     if not windows:
         return ewma, {}
 
@@ -205,25 +223,27 @@ def compute_answer_composite_score(
         window_temporal_weight(s, c) for s, c in zip(script_sims, scores, strict=True)
     ]
 
-    weighted_scores = [s * w for s, w in zip(scores, weights, strict=True)]
     strong_mask = [s >= config.STRONG_SCRIPT_THRESHOLD for s in script_sims]
     strong_ratio = sum(strong_mask) / len(script_sims)
     suspicious_flags = [bool(w.get("suspicious_flag")) for w in windows]
     susp_ratio = sum(suspicious_flags) / len(windows)
 
-    p90 = float(np.percentile(weighted_scores, 90)) if weighted_scores else 0.0
-    strong_mean = (
-        float(np.mean([ws for ws, m in zip(weighted_scores, strong_mask, strict=True) if m]))
-        if any(strong_mask)
-        else 0.0
-    )
+    p90 = weighted_percentile(scores, weights, 90.0)
+    if any(strong_mask):
+        strong_scores = [sc for sc, m in zip(scores, strong_mask, strict=True) if m]
+        strong_weights = [wt for wt, m in zip(weights, strong_mask, strict=True) if m]
+        strong_mean = float(np.average(strong_scores, weights=strong_weights))
+    else:
+        strong_mean = 0.0
 
-    composite = max(
-        ewma,
+    peak_evidence = max(
         peak_ewma * config.PEAK_EWMA_BLEND,
         p90 * config.P90_WINDOW_BLEND,
         strong_mean * config.STRONG_MEAN_BLEND,
     )
+    persistence = 0.5 * strong_ratio + 0.5 * susp_ratio
+    alpha = min(1.0, config.PEAK_CREDIBILITY_GAIN * persistence)
+    composite = float(ewma) + alpha * max(0.0, peak_evidence - float(ewma))
 
     if horizon and getattr(horizon, "script_dominance_active", False):
         floor = float(getattr(horizon, "answer_contrastive_floor", 0.0) or 0.0)
@@ -235,6 +255,9 @@ def compute_answer_composite_score(
         "p90_weighted": round(p90, 6),
         "strong_window_ratio": round(strong_ratio, 4),
         "strong_mean_weighted": round(strong_mean, 6),
+        "peak_evidence": round(peak_evidence, 6),
+        "peak_credibility_alpha": round(alpha, 4),
+        "persistence": round(persistence, 4),
     }
     return float(composite), meta
 

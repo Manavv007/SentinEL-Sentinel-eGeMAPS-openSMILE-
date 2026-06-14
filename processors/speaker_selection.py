@@ -83,6 +83,120 @@ def merge_consecutive_turns(
     return merged
 
 
+def refine_candidate_speaker(
+    segments: list[tuple[float, float, str]],
+    candidate: str,
+    totals: dict[str, float],
+) -> tuple[str, bool]:
+    """
+    AI interview bots almost always open the session.
+    If diarization + voting picked the opener, swap to the other speaker.
+    """
+    if len(totals) != 2:
+        return candidate, False
+    turns = merge_consecutive_turns(segments)
+    if not turns:
+        return candidate, False
+    opener = turns[0][2]
+    if candidate != opener:
+        return candidate, False
+    others = [spk for spk in totals if spk != candidate]
+    if not others:
+        return candidate, False
+    return others[0], True
+
+
+def filter_response_turns_only(
+    segments: list[tuple[float, float, str]],
+    candidate: str,
+    *,
+    min_duration_sec: float | None = None,
+) -> list[tuple[float, float]]:
+    """
+    In Q&A, keep candidate turns that immediately follow the other speaker.
+    Drops opener monologues and back-to-back same-speaker blips.
+    """
+    min_dur = float(min_duration_sec if min_duration_sec is not None else MIN_CANDIDATE_SEGMENT_SEC)
+    turns = merge_consecutive_turns(segments)
+    kept: list[tuple[float, float]] = []
+    for i, (start, end, spk) in enumerate(turns):
+        if spk != candidate:
+            continue
+        if i == 0:
+            continue
+        prev_spk = turns[i - 1][2]
+        if prev_spk == candidate:
+            continue
+        dur = max(0.0, end - start)
+        if dur >= min_dur:
+            kept.append((start, end))
+    return kept
+
+
+def build_candidate_turns(
+    segments: list[tuple[float, float, str]],
+    strategy: str | None = None,
+) -> tuple[list[tuple[float, float]], dict[str, Any]]:
+    """Select human candidate speaker and return filtered turn boundaries."""
+    candidate, selection = select_candidate_speaker(segments, strategy)
+    totals = speaker_total_durations(segments)
+    refined, swapped = refine_candidate_speaker(segments, candidate, totals)
+    if swapped:
+        selection = {
+            **selection,
+            "candidate_swapped": True,
+            "swap_reason": "opener_not_candidate",
+            "original_candidate": candidate,
+        }
+        candidate = refined
+
+    response_turns = filter_response_turns_only(segments, candidate)
+    if response_turns:
+        candidate_turns = response_turns
+        selection["turn_filter"] = "response_after_other_speaker"
+    else:
+        candidate_turns = filter_candidate_segments(segments, candidate)
+        selection["turn_filter"] = "duration_only_fallback"
+
+    selection["chosen_speaker"] = candidate
+    selection["candidate_turns_before_filter"] = sum(
+        1 for _, _, spk in segments if spk == candidate
+    )
+    selection["candidate_turns_after_filter"] = len(candidate_turns)
+    selection["min_candidate_segment_sec"] = MIN_CANDIDATE_SEGMENT_SEC
+    return candidate_turns, selection
+
+
+def build_dual_track_boundaries(
+    segments: list[tuple[float, float, str]],
+    strategy: str | None = None,
+    *,
+    silence_gap_sec: float = 3.0,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]], dict[str, Any]]:
+    """
+    Primary candidate track + alternate speaker track (for recovery when pyannote
+    bleeds AI interviewer speech onto the human label).
+    """
+    candidate_turns, selection = build_candidate_turns(segments, strategy)
+    totals = speaker_total_durations(segments)
+    chosen = str(selection.get("chosen_speaker", ""))
+    alternate_turns: list[tuple[float, float]] = []
+    others = [spk for spk in totals if spk != chosen]
+    if others:
+        alt_speaker = others[0]
+        alternate_turns = filter_candidate_segments(segments, alt_speaker)
+        selection["alternate_speaker"] = alt_speaker
+        selection["alternate_turns_after_filter"] = len(alternate_turns)
+
+    primary_grouped = group_into_answers(candidate_turns, silence_gap_sec=silence_gap_sec)
+    alternate_grouped = group_into_answers(
+        alternate_turns, silence_gap_sec=silence_gap_sec
+    )
+    selection["primary_answer_count"] = len(primary_grouped)
+    selection["alternate_answer_count"] = len(alternate_grouped)
+    return primary_grouped, alternate_grouped, selection
+
+
 def filter_candidate_segments(
     segments: list[tuple[float, float, str]],
     candidate: str,
@@ -183,12 +297,14 @@ def _pick_longest_turns(
     totals: dict[str, float],
 ) -> str:
     min_turn = config.CANDIDATE_TURN_MIN_SEC
+    merged_all = merge_consecutive_turns(segments)
+    opener_spk = merged_all[0][2] if merged_all else None
     scores: dict[str, float] = {}
     for speaker in totals:
         merged = [
             max(0.0, e - s)
-            for s, e, spk in merge_consecutive_turns(segments)
-            if spk == speaker
+            for idx, (s, e, spk) in enumerate(merged_all)
+            if spk == speaker and not (idx == 0 and spk == opener_spk)
         ]
         if not merged:
             merged = turn_lengths_for_speaker(segments, speaker, min_turn_sec=0.0)

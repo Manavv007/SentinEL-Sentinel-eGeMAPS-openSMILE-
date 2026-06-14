@@ -373,6 +373,17 @@ h3 { font-size: 0.95rem; margin: 1rem 0 0.5rem; color: var(--muted); }
   font-size: 0.85rem;
   color: var(--muted);
 }
+.llm-judge {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  font-size: 0.85rem;
+}
+.llm-judge.muted { color: var(--muted); border-style: dashed; }
+.llm-judge .llm-verdict { font-size: 0.9rem; }
+.llm-reasons { margin-top: 0.35rem; }
 .conf { font-size: 0.75rem; color: var(--muted); }
 .channels {
   display: flex;
