@@ -585,6 +585,33 @@ SESSION_P_PROBABLE_MIN: float = _get_float("SESSION_P_PROBABLE_MIN", 0.62)
 SESSION_EVIDENCE_UPDATE_STRENGTH: float = _get_float("SESSION_EVIDENCE_UPDATE_STRENGTH", 0.35)
 CROSS_DRIFT_VAR_SCALE: float = _get_float("CROSS_DRIFT_VAR_SCALE", 6.0)
 
+# --- Candidate-invariant relative decision layer (cross-candidate generalization) ---
+# Final session pass that re-decides per-answer verdicts from how far each answer's
+# suspicion stands ABOVE that candidate's own baseline (robust, scale-free units),
+# instead of comparing a candidate-dependent absolute score to a global threshold.
+# This removes the "tuned on one candidate, fails on the next" failure mode.
+ENABLE_RELATIVE_DECISION: bool = _get_bool("ENABLE_RELATIVE_DECISION", True)
+# Preserve AMBIGUOUS instead of forcing CLEAR/PROBABLE when reconciling (recommended).
+RELATIVE_DECISION_PRESERVE_UNCERTAINTY: bool = _get_bool(
+    "RELATIVE_DECISION_PRESERVE_UNCERTAINTY", True
+)
+# Elevation (in robust MAD units above the candidate baseline) for PROBABLE / CLEAR.
+RELATIVE_DECISION_Z_HIGH: float = _get_float("RELATIVE_DECISION_Z_HIGH", 1.25)
+RELATIVE_DECISION_Z_LOW: float = _get_float("RELATIVE_DECISION_Z_LOW", 0.5)
+# Candidate baseline = this quantile of the session's per-answer scores (low cluster).
+RELATIVE_DECISION_BASELINE_QUANTILE: float = _get_float(
+    "RELATIVE_DECISION_BASELINE_QUANTILE", 0.35
+)
+RELATIVE_DECISION_SCALE_FLOOR: float = _get_float("RELATIVE_DECISION_SCALE_FLOOR", 0.04)
+# Weak absolute guards (raw score units) — prevent pathological relative calls only.
+RELATIVE_DECISION_SOFT_ABS_FLOOR: float = _get_float("RELATIVE_DECISION_SOFT_ABS_FLOOR", 0.45)
+RELATIVE_DECISION_SOFT_ABS_CEILING: float = _get_float(
+    "RELATIVE_DECISION_SOFT_ABS_CEILING", 0.40
+)
+# Degenerate-session protection: below these, the pass is a no-op (uncertainty kept).
+RELATIVE_DECISION_MIN_ANSWERS: int = max(1, int(_get_float("RELATIVE_DECISION_MIN_ANSWERS", 3)))
+RELATIVE_DECISION_MIN_SPREAD: float = _get_float("RELATIVE_DECISION_MIN_SPREAD", 0.05)
+
 # Semantic specificity (transcript-based, person-independent)
 ENABLE_SEMANTIC_SPECIFICITY: bool = _get_bool("ENABLE_SEMANTIC_SPECIFICITY", True)
 SPECIFICITY_CLEAR_MIN: float = _get_float("SPECIFICITY_CLEAR_MIN", 0.42)

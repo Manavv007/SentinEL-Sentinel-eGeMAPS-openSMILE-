@@ -12,7 +12,9 @@ from utils.speechbrain_patch import apply_speechbrain_windows_patch
 
 apply_speechbrain_windows_patch()
 
-import whisperx
+# whisperx is imported lazily inside the functions that load/use local models. This lets
+# the pipeline import and run in a Kaggle-offload-only setup (SKIP_LOCAL_WHISPER_WHEN_KAGGLE)
+# where whisperx is not installed locally — the local model is never loaded in that mode.
 
 import config
 
@@ -45,6 +47,8 @@ def load_whisper_model():
     if _whisper_model is not None:
         return _whisper_model
 
+    import whisperx
+
     logger.info(
         "Loading WhisperX model: size=%s device=%s compute_type=%s",
         config.WHISPER_MODEL_SIZE,
@@ -75,6 +79,8 @@ def load_whisper_calibration_model(*, skip_filler_check: bool = False):
 
     if _whisper_calibration_model is not None:
         return _whisper_calibration_model
+
+    import whisperx
 
     size = config.WHISPER_CALIBRATION_MODEL_SIZE
     logger.info(
@@ -115,6 +121,8 @@ def load_align_model():
 
     if _align_model is not None:
         return _align_model, _align_metadata
+
+    import whisperx
 
     _align_model, _align_metadata = whisperx.load_align_model(
         language_code="en",
@@ -212,6 +220,8 @@ class TranscriptProcessor:
             return result
 
         align_model, metadata = load_align_model()
+        import whisperx
+
         result = whisperx.align(
             result["segments"],
             align_model,

@@ -148,10 +148,122 @@ _TECH_CONCEPT_TERMS = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Domain-agnostic content features (no hardcoded tech/domain vocabulary).
+#
+# These generalize the "scripted essay vs genuine personal answer" signal beyond the
+# AWS/WebSocket/Instagram keyword lists above, so a scripted answer in ANY domain
+# (and a genuine answer in any domain) is scored on structure, not topic words.
+# ---------------------------------------------------------------------------
+
+# First-person reference (speaker talking about themselves).
+_FP_PRONOUN = re.compile(r"\b(i|we|my|our|me|us|mine|ours|i'm|i've|i'd|i'll|we're|we've|we'll)\b", re.IGNORECASE)
+
+# First-person + experiential/action verb = genuine lived experience (domain-agnostic;
+# broad verb morphology rather than a fixed project vocabulary).
+_FP_EXPERIENTIAL = re.compile(
+    r"\b(i|we)\s+(?:\w+\s+){0,2}?"
+    r"(did|do|does|made|make|built|build|used|use|created|create|worked|work|trained|train|"
+    r"designed|design|implemented|implement|developed|develop|chose|choose|led|lead|managed|"
+    r"manage|tried|try|found|find|learned|learn|faced|face|struggled|struggle|decided|decide|"
+    r"tested|test|deployed|deploy|wrote|write|fixed|fix|improved|improve|reduced|reduce|"
+    r"increased|increase|started|start|joined|join|studied|study|experimented|analyzed|"
+    r"noticed|realized|handled|solved|presented|published|set|ran|run|took|take|got|gave|"
+    r"was|were|am|have|had|spent|chose|picked|added|removed)\b",
+    re.IGNORECASE,
+)
+
+# Generic, non-personal societal subjects — the hallmark of platitude/essay prose.
+_GENERIC_SUBJECT = re.compile(
+    r"\b(technology|technologies|people|society|everyone|everybody|anyone|anybody|someone|"
+    r"somebody|humanity|mankind|the world|the internet|users?|individuals?|students?|children|"
+    r"nowadays|these days|today's world|the way we|we all|one's|human beings?|the future)\b",
+    re.IGNORECASE,
+)
+
+# Prescriptive / generalizing essay register.
+_PRESCRIPTIVE = re.compile(
+    r"\b(it is important|it's important|we should|you should|one should|everyone should|"
+    r"we must|it is essential|it's essential|it is necessary|we need to|important to|"
+    r"that is why|this is why|in conclusion|to sum up|overall|in today's|in our daily|"
+    r"should always|should never|\bshould\b)\b",
+    re.IGNORECASE,
+)
+
+# Generic copula+predicate definitions ("X is essential", "Y is a ...") — no domain words.
+_GENERIC_DEFINITIONAL = re.compile(
+    r"\b(is|are|was|were)\s+(a|an|the|one|able to|used to|known as|defined as|considered|"
+    r"essential|important|necessary|responsible for|about)\b",
+    re.IGNORECASE,
+)
+
+# Abstract nouns / nominalizations by morphology (essays are nominalization-heavy).
+_ABSTRACT_NOUN = re.compile(
+    r"\b[a-z]{4,}(?:tion|sion|ment|ness|ity|ism|ance|ence|ship|hood)\b", re.IGNORECASE
+)
+
+# Generic second-person ("you can ...", "your ...") used for advice/essay prose.
+_SECOND_PERSON_GENERIC = re.compile(r"\b(you can|you should|you will|you must|you are|your)\b", re.IGNORECASE)
+
+
+def _domain_agnostic_signals(
+    text: str, words: list[str], sentences: list[str]
+) -> dict[str, float]:
+    """
+    Structure-based (topic-independent) features that separate scripted essay prose
+    from genuine first-person experience.
+
+    personal_experiential_score : high => speaker recounting their own actions/experience
+    essay_generic_score         : high => impersonal platitude/definition prose
+
+    essay_generic_score is intentionally weighted toward *societal subjects* and
+    *prescriptive register* (the platitude signature) rather than abstract/definitional
+    structure alone — so a genuine technical *explanation* (abstract but not preachy)
+    is not mistaken for a memorized essay.
+    """
+    n_words = max(len(words), 1)
+    n_sent = max(len(sentences), 1)
+
+    fp_experiential = len(_FP_EXPERIENTIAL.findall(text))
+    fp_sentences = sum(1 for s in sentences if _FP_PRONOUN.search(s))
+    first_person_clause_ratio = fp_sentences / n_sent
+    experiential_density = min(1.0, fp_experiential / max(n_sent / 1.5, 1.0))
+    personal_experiential_score = min(
+        1.0, 0.4 * first_person_clause_ratio + 0.6 * experiential_density
+    )
+
+    generic_subject_density = min(1.0, len(_GENERIC_SUBJECT.findall(text)) / max(n_words / 18.0, 1.0))
+    prescriptive_density = min(1.0, len(_PRESCRIPTIVE.findall(text)) / 2.0)
+    abstract_noun_ratio = min(1.0, len(_ABSTRACT_NOUN.findall(text)) / max(n_words / 9.0, 1.0))
+    second_person_density = min(1.0, len(_SECOND_PERSON_GENERIC.findall(text)) / 2.0)
+    definitional_density = min(1.0, len(_GENERIC_DEFINITIONAL.findall(text)) / max(n_sent / 1.5, 1.0))
+
+    essay_generic_score = min(
+        1.0,
+        0.40 * generic_subject_density
+        + 0.22 * prescriptive_density
+        + 0.16 * abstract_noun_ratio
+        + 0.12 * second_person_density
+        + 0.10 * definitional_density,
+    )
+    # Genuine first-person experience strongly suppresses the essay signal.
+    essay_generic_score *= 1.0 - 0.6 * personal_experiential_score
+
+    return {
+        "first_person_clause_ratio": round(first_person_clause_ratio, 4),
+        "experiential_density": round(experiential_density, 4),
+        "personal_experiential_score": round(personal_experiential_score, 4),
+        "generic_subject_density": round(generic_subject_density, 4),
+        "prescriptive_density": round(prescriptive_density, 4),
+        "abstract_noun_ratio": round(abstract_noun_ratio, 4),
+        "second_person_density": round(second_person_density, 4),
+        "definitional_density": round(definitional_density, 4),
+        "essay_generic_score": round(essay_generic_score, 4),
+    }
+
+
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[A-Za-z0-9']+", text or "")
-
-
 def _sentences(text: str) -> list[str]:
     parts = re.split(r"[.!?]+", text or "")
     return [p.strip() for p in parts if p.strip()]
@@ -169,6 +281,9 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
     n_words = max(len(words), 1)
     sentences = _sentences(text)
     n_sent = max(len(sentences), 1)
+
+    # Domain-agnostic structural signals (topic-independent personal-vs-essay).
+    da = _domain_agnostic_signals(text, words, sentences)
 
     # Proper nouns / named entities (capitalized mid-sentence or known tokens)
     proper = 0
@@ -222,6 +337,11 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         personal_narrative_hits / max(n_sent / 2.0, 1.0)
         + (0.25 if "I have been" in text or "I use" in text else 0.0),
     )
+    # Generalize beyond the keyword regex: genuine first-person experience in ANY domain
+    # (e.g. a self-introduction or a non-tech project) lifts the personal-narrative score.
+    personal_narrative_score = min(
+        1.0, max(personal_narrative_score, 0.85 * da["personal_experiential_score"])
+    )
 
     # Dense generic-tech enumeration without personal narrative = memorized technical
     # script (catches first-person-framed recitations like "We implemented microservices
@@ -266,6 +386,21 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         ),
     )
 
+    # Domain-agnostic path: catch scripted essay/platitude prose in ANY topic, even when
+    # none of the hardcoded phrase/keyword lists match. Combined with max() so this only
+    # ADDS recall for non-keyword scripts and never lowers the keyword-based score.
+    domain_agnostic_generic = max(
+        0.0,
+        min(
+            1.0,
+            (1.0 - specificity_score) * 0.28
+            + da["essay_generic_score"] * 0.55
+            + (1.0 - da["personal_experiential_score"]) * 0.10
+            + (1.0 - hedging_presence) * 0.05,
+        ),
+    )
+    generic_script_likelihood = max(generic_script_likelihood, domain_agnostic_generic)
+
     reasons: list[str] = []
     if proper_noun_density >= 0.35:
         reasons.append(f"proper nouns / named details ({proper} tokens)")
@@ -275,6 +410,11 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"spontaneous hedging ({hedges} markers)")
     if generic_phrase_density >= 0.35:
         reasons.append("generic essay / platitude phrasing detected")
+    if da["essay_generic_score"] >= 0.45 and da["personal_experiential_score"] < 0.35:
+        reasons.append(
+            f"domain-agnostic essay structure {da['essay_generic_score']:.2f} — "
+            f"impersonal/societal subjects, low first-person experience (topic-independent)"
+        )
     if memorized_technical_script_score >= 0.45:
         reasons.append(
             f"memorized technical script patterns {memorized_technical_script_score:.2f} "
@@ -304,6 +444,13 @@ def compute_semantic_specificity(transcript: dict[str, Any]) -> dict[str, Any]:
         "memorized_technical_script_score": round(memorized_technical_script_score, 4),
         "tech_definition_hits": tech_def_hits,
         "technical_concept_density": round(tech_concept_density, 4),
+        # Domain-agnostic (topic-independent) structural features:
+        "personal_experiential_score": da["personal_experiential_score"],
+        "essay_generic_score": da["essay_generic_score"],
+        "first_person_clause_ratio": da["first_person_clause_ratio"],
+        "generic_subject_density": da["generic_subject_density"],
+        "abstract_noun_ratio": da["abstract_noun_ratio"],
+        "prescriptive_density": da["prescriptive_density"],
         "word_count": n_words,
         "reasons": reasons,
     }

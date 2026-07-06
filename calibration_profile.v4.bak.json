@@ -1,0 +1,54 @@
+{
+  "version": 4,
+  "source_video": "caliberation_file\\pre-train-demo.mp4",
+  "timeline_path": "caliberation_file\\gaze_lip_timeline.json",
+  "acoustic_reading_profile": {
+    "F0semitoneFrom27.5Hz_sma3nz_stddevNorm": {
+      "mean": 0.1618858203291893,
+      "std": 0.0510256795462544
+    },
+    "MeanVoicedSegmentLengthSec": {
+      "mean": 0.11916676256805658,
+      "std": 0.05
+    },
+    "MeanUnvoicedSegmentLength": {
+      "mean": 0.09063464589416981,
+      "std": 0.05
+    },
+    "jitter_local": {
+      "mean": 0.0,
+      "std": 0.05
+    },
+    "shimmer_local": {
+      "mean": 0.0,
+      "std": 0.05
+    },
+    "hnr": {
+      "mean": 5.576839997008731,
+      "std": 0.6764442097293443
+    },
+    "pitch_range_hz": {
+      "mean": 374.4009131653499,
+      "std": 36.86501797371902
+    }
+  },
+  "linguistic_calibration": {
+    "wps_cv_mean": 0.0,
+    "wps_cv_std": 0.05,
+    "gap_variance_mean": 0.013137528847589156,
+    "gap_variance_std": 0.05
+  },
+  "gaze_calibration": {
+    "blink_rate_mean": 0.0,
+    "blink_rate_std": 0.05
+  },
+  "lip_calibration": {
+    "aperture_variance_mean": 0.00016468441643653902,
+    "aperture_variance_std": 0.05,
+    "movement_rate_cv_baseline": 1.0693784471497367,
+    "asymmetry_baseline": 0.0
+  },
+  "calibration_answers": 2,
+  "calibration_windows": 8,
+  "timeline_frames": 376
+}

@@ -108,44 +108,67 @@ def _startup_models(
     use_kaggle_asr = (
         gpu_client.offload_active
         and config.SKIP_LOCAL_WHISPER_WHEN_KAGGLE
-        and not calibration
     )
+
+    def _load_local_whisper() -> None:
+        """Load the appropriate local Whisper model; raises if whisperx is unavailable."""
+        if calibration and config.FAST_CALIBRATION:
+            load_whisper_calibration_model(skip_filler_check=True)
+        else:
+            load_whisper_model()
+
     if use_kaggle_asr:
         log.log(
             "startup",
             _tag_message(
-                "Kaggle GPU offload active — skipping local Whisper load for interview",
+                "Kaggle GPU offload active — skipping local Whisper load"
+                + (" (calibration)" if calibration else " for interview"),
                 "kaggle",
             ),
             phase="system",
             metrics={"kaggle_url": config.KAGGLE_GPU_URL, "runtime": "kaggle"},
         )
+        # Optional local fallback — never fatal if whisperx is not installed locally.
         if config.KAGGLE_FALLBACK_LOCAL_ASR:
-            log.log(
-                "startup",
-                f"Preloading local Whisper ({config.WHISPER_MODEL_SIZE}) as Kaggle ASR fallback",
-                phase="system",
-            )
-            load_whisper_model()
+            try:
+                _load_local_whisper()
+                log.log(
+                    "startup",
+                    "Local Whisper preloaded as Kaggle ASR fallback",
+                    phase="system",
+                )
+            except Exception as exc:
+                log.log(
+                    "startup",
+                    f"Local Whisper fallback unavailable ({exc}) — relying on Kaggle ASR",
+                    phase="system",
+                    level="warning",
+                )
         return gpu_client
 
-    if calibration and config.FAST_CALIBRATION:
-        log.log(
-            "startup",
-            (
-                f"Loading models (calibration Whisper "
-                f"{config.WHISPER_CALIBRATION_MODEL_SIZE}, interview {config.WHISPER_MODEL_SIZE})"
-            ),
-            phase="system",
-        )
-        load_whisper_calibration_model(skip_filler_check=True)
-    else:
-        log.log(
-            "startup",
-            f"Loading models (Whisper {config.WHISPER_MODEL_SIZE}, {config.WHISPER_COMPUTE_TYPE})",
-            phase="system",
-        )
-        load_whisper_model()
+    # No Kaggle offload: local Whisper is required, but degrade gracefully to Kaggle
+    # if it is configured and the local model cannot be loaded (e.g. whisperx absent).
+    log.log(
+        "startup",
+        (
+            f"Loading models (calibration Whisper {config.WHISPER_CALIBRATION_MODEL_SIZE})"
+            if calibration and config.FAST_CALIBRATION
+            else f"Loading models (Whisper {config.WHISPER_MODEL_SIZE}, {config.WHISPER_COMPUTE_TYPE})"
+        ),
+        phase="system",
+    )
+    try:
+        _load_local_whisper()
+    except Exception as exc:
+        if gpu_client.offload_active:
+            log.log(
+                "startup",
+                f"Local Whisper unavailable ({exc}) — falling back to Kaggle GPU ASR",
+                phase="system",
+                level="warning",
+            )
+        else:
+            raise
     return gpu_client
 
 
@@ -339,6 +362,65 @@ def _gpu_score(
     return None
 
 
+def _transcribe_calibration_answers(
+    gpu_client: KaggleGPUClient,
+    transcript_proc: "TranscriptProcessor",
+    answers: list[dict[str, Any]],
+    *,
+    fast: bool,
+    log: PipelineLogger,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Transcribe calibration answers, offloading to Kaggle GPU when configured.
+
+    Calibration previously always used local Whisper, which prevented building a v5
+    SCRIPT profile in Kaggle-only setups (no local whisperx). When Kaggle ASR offload
+    is active we transcribe each calibration answer on the GPU (same Whisper as the
+    interview), falling back to local Whisper per-answer only if it is available.
+    """
+    if not gpu_client.offload_active:
+        return transcript_proc.transcribe_answers(answers, calibration_fast=fast), "local"
+
+    outputs: list[dict[str, Any]] = []
+    kaggle_ok = 0
+    for ans in answers:
+        aid = int(ans.get("answer_id", 0))
+        audio_bytes = ans.get("audio_bytes", b"") or b""
+        duration = float(ans.get("end_sec", 0.0)) - float(ans.get("start_sec", 0.0))
+        tr = None
+        if audio_bytes:
+            tr = gpu_client.transcribe_answer(
+                audio_bytes, answer_id=aid, duration_sec=max(duration, 0.0)
+            )
+        if tr is not None:
+            kaggle_ok += 1
+        elif config.KAGGLE_FALLBACK_LOCAL_ASR:
+            try:
+                tr = transcript_proc.transcribe_answer(
+                    answer_id=aid,
+                    audio_bytes=audio_bytes,
+                    start_sec=float(ans.get("start_sec", 0.0)),
+                    end_sec=float(ans.get("end_sec", 0.0)),
+                    calibration_fast=fast,
+                )
+            except Exception as exc:
+                log.log(
+                    "asr",
+                    f"Calibration answer {aid}: Kaggle + local ASR both failed ({exc})",
+                    phase="calibrate",
+                    level="warning",
+                )
+        outputs.append(tr or {"answer_id": aid, "transcript": "", "words": []})
+
+    log.log(
+        "asr",
+        f"Calibration transcription via Kaggle GPU ({kaggle_ok}/{len(answers)} answers)",
+        phase="calibrate",
+        metrics={"kaggle_ok": kaggle_ok, "answers": len(answers)},
+    )
+    return outputs, "kaggle"
+
+
 def run_calibrate(
     video_path: str | Path,
     *,
@@ -450,13 +532,15 @@ def run_calibrate(
         f"Transcribing calibration (Whisper {config.WHISPER_CALIBRATION_MODEL_SIZE if fast else config.WHISPER_MODEL_SIZE})...",
     )
     t_asr = time.perf_counter()
-    cal_transcripts = transcript_proc.transcribe_answers(answers, calibration_fast=fast)
+    cal_transcripts, asr_backend = _transcribe_calibration_answers(
+        gpu_client, transcript_proc, answers, fast=fast, log=log
+    )
     asr_sec = round(time.perf_counter() - t_asr, 2)
     log.log(
         "asr",
-        f"Calibration transcription ({asr_sec}s)",
+        f"Calibration transcription ({asr_sec}s, backend={asr_backend})",
         phase="calibrate",
-        metrics={"backend": config.WHISPER_CALIBRATION_MODEL_SIZE if fast else config.WHISPER_MODEL_SIZE},
+        metrics={"backend": asr_backend},
     )
     linguistic_calibration = linguistic_analyzer.calibrate(cal_transcripts)
     log.log(
@@ -1799,6 +1883,42 @@ def run_analyze(
             decision=f"drift_uniformity={session_intra.get('cross_answer_drift', {}).get('cross_answer_uniformity')}",
         )
 
+    # Final authority: candidate-invariant relative decision. Re-decides verdicts from
+    # how far each answer's suspicion stands above THIS candidate's own baseline,
+    # removing the cross-candidate failure caused by global absolute thresholds.
+    session_relative_decision: dict[str, Any] = {}
+    if config.ENABLE_RELATIVE_DECISION:
+        from engine.score_normalization import (
+            RelativeDecisionConfig,
+            apply_relative_decision_to_answers,
+        )
+
+        rel_cfg = RelativeDecisionConfig.from_config(config)
+        session_relative_decision = apply_relative_decision_to_answers(
+            results_answers,
+            rel_cfg,
+            preserve_uncertainty=config.RELATIVE_DECISION_PRESERVE_UNCERTAINTY,
+        )
+        log.log(
+            "relative_decision",
+            (
+                "Candidate-relative re-decision: {applied} change(s), "
+                "baseline={baseline}, scale={scale}, spread={spread}, degenerate={deg}"
+            ).format(
+                applied=session_relative_decision.get("applied", 0),
+                baseline=session_relative_decision.get("candidate_baseline"),
+                scale=session_relative_decision.get("candidate_scale"),
+                spread=session_relative_decision.get("session_spread"),
+                deg=session_relative_decision.get("degenerate_session"),
+            ),
+            phase="analyze",
+            metrics={
+                "applied": session_relative_decision.get("applied", 0),
+                "degenerate_session": session_relative_decision.get("degenerate_session"),
+            },
+            decision=f"changes={len(session_relative_decision.get('changes', []))}",
+        )
+
     if config.ENABLE_LLM_JUDGE:
         from engine.llm_judge import apply_llm_judge_to_answers
 
@@ -1815,6 +1935,8 @@ def run_analyze(
         "answers": results_answers,
         "decision_log": log.to_list(),
     }
+    if session_relative_decision:
+        payload["session_relative_decision"] = session_relative_decision
     if use_contrastive:
         payload["window_logs"] = contrastive.export_window_logs()
         payload["profile_update_logs"] = contrastive.export_profile_update_logs()
