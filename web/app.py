@@ -8,6 +8,7 @@ import logging
 import shutil
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,11 +87,7 @@ def _result_summary(result: dict[str, Any], kind: str) -> dict[str, Any]:
 jobs: dict[str, Job] = {}
 _jobs_lock = asyncio.Lock()
 
-app = FastAPI(title="SentinEL", version="1.0.0")
-app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
-
-@app.on_event("startup")
 async def _warmup_models() -> None:
     """Preload Whisper in background so first calibration job is faster."""
     import config as cfg
@@ -106,6 +103,26 @@ async def _warmup_models() -> None:
     import asyncio
 
     asyncio.create_task(_load())
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    await _warmup_models()
+    yield
+
+
+app = FastAPI(title="SentinEL", version="1.0.0", lifespan=_lifespan)
+
+if STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    index_file = STATIC / "index.html"
+    if not index_file.is_file():
+        return HTMLResponse("<h1>SentinEL</h1><p>index.html not found.</p>", status_code=500)
+    return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
 def _preload_sync() -> None:
@@ -239,11 +256,6 @@ async def _run_analyze_job(
         job.status = "error"
         job.error = str(exc)
         job.message = f"Failed: {exc}"
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
 
 
 def _check_dependencies() -> str | None:

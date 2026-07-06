@@ -823,13 +823,13 @@ def run_analyze(
 
     use_kaggle_segment = gpu_client.offload_segmentation_active
     if use_kaggle_segment:
-            log.log(
-                "kaggle_segment",
-                _tag_message(
-                    f"Kaggle segmentation ({config.KAGGLE_SEGMENT_MODE}) — local pyannote skipped",
-                    "kaggle",
-                ),
-                phase="analyze",
+        log.log(
+            "kaggle_segment",
+            _tag_message(
+                f"Kaggle segmentation ({config.KAGGLE_SEGMENT_MODE}) — local pyannote skipped",
+                "kaggle",
+            ),
+            phase="analyze",
             metrics={
                 "kaggle_url": config.KAGGLE_GPU_URL,
                 "segment_mode": config.KAGGLE_SEGMENT_MODE,
@@ -1824,8 +1824,8 @@ def run_analyze(
                 "gaze_breakdown": gaze_breakdown,
                 "lip_breakdown": lip_breakdown,
                 "linguistic_breakdown": ling_breakdown,
-                "transcript": transcript.get("transcript", ""),
-                "transcription_backend": transcript.get("transcription_backend", ""),
+                "transcript": (transcript or {}).get("transcript", ""),
+                "transcription_backend": (transcript or {}).get("transcription_backend", ""),
                 "num_windows": len(answer.get("windows", [])),
                 "timeline_frames": 0,
             }
