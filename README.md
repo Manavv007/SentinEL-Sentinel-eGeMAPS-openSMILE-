@@ -190,8 +190,8 @@ If you want faster transcription or wish to run Whisper `large-v3` without overl
 Update your local [`.env`](file:///c:/Users/Manav/Downloads/openHands2/.env) file with the tunnel configuration:
 ```env
 KAGGLE_GPU_URL=https://xxxx.ngrok-free.dev
-KAGGLE_SECRET=sentinEL2026
-SENTINEL_SECRET=sentinEL2026
+KAGGLE_SECRET=your_shared_secret_here
+SENTINEL_SECRET=your_shared_secret_here
 SKIP_LOCAL_WHISPER_WHEN_KAGGLE=true
 ```
 

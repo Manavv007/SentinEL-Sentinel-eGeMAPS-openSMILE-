@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH)
@@ -15,8 +18,8 @@ try:
     from utils.speechbrain_patch import apply_speechbrain_windows_patch
 
     apply_speechbrain_windows_patch()
-except Exception:
-    pass
+except Exception as exc:
+    logger.debug("SpeechBrain Windows patch skipped: %s", exc)
 
 
 def _require(name: str) -> str:

@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 import traceback
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -25,6 +24,7 @@ JOBS = DATA / "jobs"
 
 ALLOWED_EXT = {".mp4", ".webm", ".mkv", ".mov", ".wav", ".m4a"}
 MAX_POLL_LOGS = 300
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ async def _warmup_models() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _warmup_models()
     yield
 
@@ -160,8 +160,20 @@ def _job_dir(job_id: str) -> Path:
 
 def _save_upload(upload: UploadFile, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
     with dest.open("wb") as f:
-        shutil.copyfileobj(upload.file, f)
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    413,
+                    f"File too large. Maximum allowed size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                )
+            f.write(chunk)
 
 
 def _check_ext(filename: str) -> str:
@@ -212,8 +224,8 @@ async def _run_calibrate_job(job: Job, video_path: Path) -> None:
     except Exception as exc:
         logger.error("Calibrate job failed:\n%s", traceback.format_exc())
         job.status = "error"
-        job.error = str(exc)
-        job.message = f"Failed: {exc}"
+        job.error = "An internal error occurred during calibration."
+        job.message = "Calibration failed"
 
 
 async def _run_analyze_job(
@@ -254,8 +266,8 @@ async def _run_analyze_job(
     except Exception as exc:
         logger.error("Analyze job failed:\n%s", traceback.format_exc())
         job.status = "error"
-        job.error = str(exc)
-        job.message = f"Failed: {exc}"
+        job.error = "An internal error occurred during analysis."
+        job.message = "Analysis failed"
 
 
 def _check_dependencies() -> str | None:
